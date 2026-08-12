@@ -90,8 +90,8 @@ public static class WarpCli
         /// <summary>Start GoodbyeDPI TLS fragment before connect (GFW-knocker style).</summary>
         public bool DpiAssist { get; init; } = true;
         /// <summary>
-        /// After connect: stop DPI assist, prefer tunnel_only (DNSveil owns DNS),
-        /// optional WireGuard upgrade, exclude domestic IR ranges from the tunnel.
+        /// Before connect: tunnel_only (DNSveil owns DNS). After connect: stop DPI assist,
+        /// optional WireGuard upgrade, soft Iran excludes — never re-flip mode (that drops tunnels).
         /// </summary>
         public bool LowLatency { get; init; } = true;
         /// <summary>When false, skip WireGuard upgrade (saves ~10–30s under DPI).</summary>
@@ -454,19 +454,37 @@ public static class WarpCli
     {
         censorship ??= new CensorshipOptions { Enabled = false, DpiAssist = false };
 
+        WarpSessionLog.Step("connect", "TryConnectWithFallback start",
+            new Dictionary<string, object?>
+            {
+                ["preferredProtocol"] = preferredProtocol,
+                ["censorship"] = censorship.Enabled,
+                ["dpi"] = censorship.DpiAssist,
+                ["lowLatency"] = censorship.LowLatency,
+                ["iranExcludes"] = censorship.ApplyIranExcludes,
+                ["wgUpgrade"] = censorship.TryWireGuardUpgrade,
+            });
+
         if (!IsInstalled())
+        {
+            WarpSessionLog.Step("connect", "warp-cli not installed");
             return (false, "Cloudflare WARP (warp-cli) is not installed.", null, preferredProtocol);
+        }
 
         // Ensure Windows service is up (auto-start if stopped).
         var (svcOk, svcMsg, _) = await WarpPreflight.EnsureWarpServiceAsync(progress, ct).ConfigureAwait(false);
         if (!svcOk)
+        {
+            WarpSessionLog.Step("connect", "service failed: " + svcMsg);
             return (false, svcMsg, null, preferredProtocol);
+        }
 
         // DPI assist first — fragment TLS ClientHello so engage/MASQUE H2 is not RST'd on SNI.
         if (censorship.DpiAssist)
         {
             var (dpiOk, dpiMsg) = await WarpDpiAssist.StartAsync(progress: progress).ConfigureAwait(false);
             progress?.Report(dpiMsg);
+            WarpSessionLog.Step("dpi", dpiMsg, new Dictionary<string, object?> { ["ok"] = dpiOk });
             if (!dpiOk)
                 progress?.Report("Continuing without DPI assist…");
         }
@@ -477,19 +495,30 @@ public static class WarpCli
         if (!EnsureRegistration(progress))
         {
             if (censorship.DpiAssist) await WarpDpiAssist.StopAsync().ConfigureAwait(false);
+            WarpSessionLog.Step("connect", "registration failed");
             return (false, "WARP registration failed. Open the official WARP app once (or enable DPI assist), accept the ToS, then retry.", null, preferredProtocol);
         }
 
-        // Gaming / low-latency: skip WARP DNS (DNSveil already does DNS) — less hop/overhead.
+        // Gaming / low-latency: set tunnel_only ONCE before connect. Re-applying after connect
+        // restarts the tunnel and often drops a working MASQUE session.
         if (censorship.LowLatency)
         {
             progress?.Report("Mode: tunnel_only (DNS stays with DNSveil — lower gaming latency)…");
-            SetModeTunnelOnly();
-            Run("debug", "high-timeouts", "disable");
+            Result mode = SetModeTunnelOnly();
+            Result hi = Run("debug", "high-timeouts", "disable");
+            WarpSessionLog.Step("mode", "tunnel_only before connect",
+                new Dictionary<string, object?>
+                {
+                    ["modeOk"] = mode.Ok,
+                    ["modeOut"] = mode.Combined,
+                    ["highTimeoutsOk"] = hi.Ok,
+                });
         }
         else
         {
-            SetModeWarp();
+            Result mode = SetModeWarp();
+            WarpSessionLog.Step("mode", "warp before connect",
+                new Dictionary<string, object?> { ["ok"] = mode.Ok, ["out"] = mode.Combined });
         }
 
         List<string> list = endpoints?.Where(e => !string.IsNullOrWhiteSpace(e)).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
@@ -498,6 +527,7 @@ public static class WarpCli
         if (censorship.Enabled && list.Count == 0)
         {
             list = await BuildCensorshipCandidatesAsync(preferredProtocol, censorship, progress, ct).ConfigureAwait(false);
+            WarpSessionLog.Step("scan", $"candidates built: {list.Count}");
         }
 
         // Under censorship: MASQUE only in the main loop (fast). Optional WG upgrade happens after connect.
@@ -529,13 +559,17 @@ public static class WarpCli
             if (tryList.Count == 0)
             {
                 progress?.Report($"Connecting with Cloudflare default endpoint ({protocol})…");
+                WarpSessionLog.Step("attempt", $"default endpoint ({protocol})");
                 ResetEndpoint();
                 if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: censorship.Enabled).ConfigureAwait(false))
                 {
                     return await FinishConnectedAsync(
                         $"Connected via default endpoint ({protocol}).", null, protocol, censorship, progress, ct).ConfigureAwait(false);
                 }
-                progress?.Report("Default endpoint failed: " + ParseStatus(Status()));
+                string failSt = ParseStatus(Status());
+                progress?.Report("Default endpoint failed: " + failSt);
+                WarpSessionLog.Step("attempt", "default failed",
+                    new Dictionary<string, object?> { ["status"] = failSt });
                 continue;
             }
 
@@ -554,33 +588,57 @@ public static class WarpCli
                 progress?.Report($"{reachable.Count} endpoints look reachable (fastest first) — connecting…");
             }
 
+            WarpSessionLog.Step("probe", $"reachable={reachable.Count}",
+                new Dictionary<string, object?>
+                {
+                    ["protocol"] = protocol,
+                    ["endpoints"] = string.Join(", ", reachable.Take(12)),
+                });
+
             int n = 0;
             foreach (string endpoint in reachable)
             {
                 ct.ThrowIfCancellationRequested();
                 n++;
                 progress?.Report($"[{n}/{reachable.Count}] Connecting {endpoint} ({protocol})…");
+                WarpSessionLog.Step("attempt", $"[{n}/{reachable.Count}] {endpoint} ({protocol})");
                 Disconnect();
                 Result setEp = SetEndpoint(endpoint);
                 if (!setEp.Ok)
                 {
                     progress?.Report($"Skip {endpoint}: {setEp.ErrorLine}");
+                    WarpSessionLog.Step("attempt", "set-endpoint failed",
+                        new Dictionary<string, object?> { ["endpoint"] = endpoint, ["err"] = setEp.ErrorLine });
                     continue;
                 }
 
                 if (await PollConnectedAsync(progress, verifyWarpOn: false, ct, longPoll: censorship.Enabled).ConfigureAwait(false))
                 {
                     PublicIpInfo info = await FetchPublicIpInfoAsync(5000).ConfigureAwait(false);
+                    WarpSessionLog.Step("attempt", "poll connected",
+                        new Dictionary<string, object?>
+                        {
+                            ["endpoint"] = endpoint,
+                            ["protocol"] = protocol,
+                            ["status"] = ParseStatus(Status()),
+                            ["ip"] = info.Ip,
+                            ["warpOn"] = info.WarpOn,
+                            ["loc"] = info.Loc,
+                        });
                     if (info.WarpOn != false)
                     {
                         return await FinishConnectedAsync(
                             $"Connected via {endpoint} ({protocol}).", endpoint, protocol, censorship, progress, ct).ConfigureAwait(false);
                     }
                     progress?.Report("Status connected but warp=off — trying next…");
+                    WarpSessionLog.Step("attempt", "warp=off despite Connected status");
                 }
                 else
                 {
-                    progress?.Report($"No connect on {endpoint}: {ParseStatus(Status())}");
+                    string st = ParseStatus(Status());
+                    progress?.Report($"No connect on {endpoint}: {st}");
+                    WarpSessionLog.Step("attempt", "not connected",
+                        new Dictionary<string, object?> { ["endpoint"] = endpoint, ["status"] = st });
                 }
             }
         }
@@ -589,6 +647,7 @@ public static class WarpCli
         if (!censorship.Enabled || list.Count > 0)
         {
             progress?.Report("Last resort: default endpoint + MASQUE…");
+            WarpSessionLog.Step("attempt", "last resort default MASQUE");
             Disconnect();
             ResetEndpoint();
             SetProtocol("MASQUE");
@@ -602,6 +661,7 @@ public static class WarpCli
 
         if (censorship.DpiAssist) await WarpDpiAssist.StopAsync().ConfigureAwait(false);
 
+        WarpSessionLog.Step("connect", "all attempts exhausted");
         return (false,
             "Could not connect under censorship. Tips: keep \"DPI assist\" on, try again (new CF IPs), " +
             "or paste a working IP:443 from Clean IP Scanner / IRCF. " +
@@ -611,7 +671,8 @@ public static class WarpCli
     }
 
     /// <summary>
-    /// Post-connect latency pass: stop WinDivert fragmentor, optional WG upgrade, IR split-tunnel excludes.
+    /// Post-connect latency pass: stop WinDivert, optional WG upgrade, soft IR excludes.
+    /// Never re-set tunnel mode after a proven connect — that drops the session.
     /// </summary>
     private static async Task<(bool Ok, string Message, string? Endpoint, string Protocol)> FinishConnectedAsync(
         string message,
@@ -621,20 +682,39 @@ public static class WarpCli
         IProgress<string>? progress,
         CancellationToken ct)
     {
+        WarpSessionLog.Step("finish", "proven connect — starting post-connect profile",
+            new Dictionary<string, object?>
+            {
+                ["endpoint"] = endpoint,
+                ["protocol"] = protocol,
+                ["lowLatency"] = opt.LowLatency,
+                ["status"] = ParseStatus(Status()),
+            });
+
         // Critical for gaming: GoodbyeDPI/WinDivert adds latency to all TCP — stop once tunnel is up.
         if (opt.DpiAssist || WarpDpiAssist.IsActive)
         {
             progress?.Report("Stopping DPI assist (WinDivert fragment adds latency to games)…");
             await WarpDpiAssist.StopAsync().ConfigureAwait(false);
+            if (!await EnsureTunnelAliveAsync(endpoint, protocol, progress, ct, "after DPI stop").ConfigureAwait(false))
+            {
+                WarpSessionLog.Step("finish", "lost tunnel after DPI stop; could not restore");
+                return (false,
+                    "Connected briefly, then dropped when stopping DPI assist. Retry Auto-find (log saved).",
+                    endpoint, protocol);
+            }
         }
 
         string usedProtocol = protocol;
         string? usedEndpoint = endpoint;
+        var gamingNotes = new List<string>();
 
         if (opt.LowLatency)
         {
-            SetModeTunnelOnly();
-            Run("debug", "high-timeouts", "disable");
+            // Do NOT call SetModeTunnelOnly() again — already applied before connect.
+            // Mode changes after Connected restart the tunnel and often fail under DPI.
+            progress?.Report("Gaming profile: keeping proven tunnel (no mode re-apply)…");
+            WarpSessionLog.Step("gaming", "skip post-connect mode change (preserves tunnel)");
 
             // WG upgrade is optional — under Iranian DPI it often fails and wastes 15–40s.
             if (opt.TryWireGuardUpgrade &&
@@ -646,10 +726,19 @@ public static class WarpCli
                     usedProtocol = "WireGuard";
                     usedEndpoint = upgraded.Endpoint ?? endpoint;
                     message = $"Connected via {usedEndpoint ?? "default"} (WireGuard, upgraded from MASQUE for lower latency).";
+                    gamingNotes.Add("wg-upgrade=ok");
                 }
                 else
                 {
                     progress?.Report("WireGuard upgrade skipped — staying on MASQUE.");
+                    gamingNotes.Add("wg-upgrade=skipped");
+                    if (!await EnsureTunnelAliveAsync(endpoint, protocol, progress, ct, "after WG upgrade revert").ConfigureAwait(false))
+                    {
+                        WarpSessionLog.Step("finish", "lost tunnel after WG upgrade attempt");
+                        return (false,
+                            "Connected on MASQUE, then lost during WireGuard upgrade. Retry Auto-find (log saved).",
+                            endpoint, protocol);
+                    }
                 }
             }
 
@@ -657,12 +746,90 @@ public static class WarpCli
             {
                 progress?.Report("Excluding Iran/domestic ranges from tunnel (cached after first run)…");
                 await Task.Run(() => ApplyDomesticSplitTunnelExcludes(progress), ct).ConfigureAwait(false);
+                if (!await EnsureTunnelAliveAsync(usedEndpoint, usedProtocol, progress, ct, "after Iran excludes").ConfigureAwait(false))
+                {
+                    // Ranges may still be in warp-cli; do not re-flood them next time this process.
+                    progress?.Report("Iran excludes unsettled the tunnel and restore failed.");
+                    gamingNotes.Add("iran-excludes=failed");
+                    WarpSessionLog.Step("gaming", "Iran excludes dropped tunnel; restore failed");
+                    return (false,
+                        "Connected, then dropped while applying gaming Iran excludes. Uncheck Low latency and retry, or retry Auto-find (log saved).",
+                        endpoint, protocol);
+                }
+                gamingNotes.Add("iran-excludes=ok");
             }
 
-            message += " Low-latency profile applied.";
+            message += gamingNotes.Count > 0
+                ? " Low-latency profile applied (" + string.Join(", ", gamingNotes) + ")."
+                : " Low-latency profile applied.";
         }
 
+        PublicIpInfo finalInfo = await FetchPublicIpInfoAsync(5000).ConfigureAwait(false);
+        WarpSessionLog.Step("finish", "complete",
+            new Dictionary<string, object?>
+            {
+                ["message"] = message,
+                ["endpoint"] = usedEndpoint,
+                ["protocol"] = usedProtocol,
+                ["status"] = ParseStatus(Status()),
+                ["ip"] = finalInfo.Ip,
+                ["warpOn"] = finalInfo.WarpOn,
+                ["loc"] = finalInfo.Loc,
+                ["gaming"] = gamingNotes,
+            });
+
         return (true, message, usedEndpoint, usedProtocol);
+    }
+
+    /// <summary>
+    /// Confirm Connected + warp≠off; if broken, reconnect the proven endpoint/protocol without mode flips.
+    /// </summary>
+    private static async Task<bool> EnsureTunnelAliveAsync(
+        string? endpoint,
+        string protocol,
+        IProgress<string>? progress,
+        CancellationToken ct,
+        string phase)
+    {
+        Result st = Status();
+        bool connected = IsConnected(st);
+        PublicIpInfo info = await FetchPublicIpInfoAsync(4000).ConfigureAwait(false);
+        WarpSessionLog.Step("verify", phase,
+            new Dictionary<string, object?>
+            {
+                ["status"] = ParseStatus(st),
+                ["connected"] = connected,
+                ["ip"] = info.Ip,
+                ["warpOn"] = info.WarpOn,
+                ["loc"] = info.Loc,
+                ["endpoint"] = endpoint,
+                ["protocol"] = protocol,
+            });
+
+        if (connected && info.WarpOn != false)
+            return true;
+
+        progress?.Report($"Tunnel not healthy after {phase} — restoring {endpoint ?? "default"} ({protocol})…");
+        WarpSessionLog.Step("recover", $"restore after {phase}");
+        Disconnect();
+        SetProtocol(protocol);
+        if (protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
+            SetMasqueOptions("h3-with-h2-fallback");
+        if (!string.IsNullOrWhiteSpace(endpoint))
+            SetEndpoint(endpoint);
+        else
+            ResetEndpoint();
+
+        bool ok = await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: true).ConfigureAwait(false);
+        PublicIpInfo after = await FetchPublicIpInfoAsync(4000).ConfigureAwait(false);
+        WarpSessionLog.Step("recover", ok ? "restore ok" : "restore failed",
+            new Dictionary<string, object?>
+            {
+                ["status"] = ParseStatus(Status()),
+                ["ip"] = after.Ip,
+                ["warpOn"] = after.WarpOn,
+            });
+        return ok && after.WarpOn != false;
     }
 
     /// <summary>Try same host on classic WG ports — lower overhead than MASQUE/H2 when UDP works.</summary>
@@ -743,6 +910,7 @@ public static class WarpCli
         }
         _iranExcludesApplied = true;
         progress?.Report($"Split-tunnel excludes applied ({ok}/{ranges.Length} ranges).");
+        WarpSessionLog.Step("gaming", $"iran excludes {ok}/{ranges.Length}");
     }
 
     public static async Task<List<string>> FilterReachableEndpointsAsync(
@@ -853,7 +1021,15 @@ public static class WarpCli
     private static async Task<bool> PollConnectedAsync(
         IProgress<string>? progress, bool verifyWarpOn, CancellationToken ct, bool longPoll = false)
     {
-        Connect();
+        Result connect = Connect();
+        WarpSessionLog.Step("poll", "connect issued",
+            new Dictionary<string, object?>
+            {
+                ["ok"] = connect.Ok,
+                ["out"] = connect.Combined,
+                ["verifyWarpOn"] = verifyWarpOn,
+                ["longPoll"] = longPoll,
+            });
         int loops = longPoll ? (verifyWarpOn ? 20 : 14) : (verifyWarpOn ? 12 : 8);
         int delay = longPoll ? 500 : 400;
         for (int i = 0; i < loops; i++)
@@ -862,23 +1038,45 @@ public static class WarpCli
             Result st = Status();
             string parsed = ParseStatus(st);
             if (parsed.Contains("Failed", StringComparison.OrdinalIgnoreCase))
+            {
+                WarpSessionLog.Step("poll", "failed status", new Dictionary<string, object?> { ["i"] = i, ["status"] = parsed });
                 return false;
+            }
             if (i >= 3 && (parsed.Contains("Disconnected", StringComparison.OrdinalIgnoreCase) ||
                            parsed.Contains("Not connected", StringComparison.OrdinalIgnoreCase)))
+            {
+                WarpSessionLog.Step("poll", "disconnected early", new Dictionary<string, object?> { ["i"] = i, ["status"] = parsed });
                 return false;
+            }
 
             if (!IsConnected(st)) continue;
 
-            if (!verifyWarpOn) return true;
+            if (!verifyWarpOn)
+            {
+                WarpSessionLog.Step("poll", "connected (status only)", new Dictionary<string, object?> { ["i"] = i, ["status"] = parsed });
+                return true;
+            }
 
             PublicIpInfo info = await FetchPublicIpInfoAsync(4000).ConfigureAwait(false);
-            if (info.WarpOn == true) return true;
+            if (info.WarpOn == true)
+            {
+                WarpSessionLog.Step("poll", "connected warp=on",
+                    new Dictionary<string, object?> { ["i"] = i, ["ip"] = info.Ip, ["loc"] = info.Loc });
+                return true;
+            }
             if (info.WarpOn == false)
                 progress?.Report("warp-cli says Connected but trace shows warp=off — waiting…");
             else if (i >= 6)
+            {
+                WarpSessionLog.Step("poll", "connected warp=unknown accepted",
+                    new Dictionary<string, object?> { ["i"] = i, ["ip"] = info.Ip });
                 return true;
+            }
         }
-        return IsConnected(Status());
+        bool final = IsConnected(Status());
+        WarpSessionLog.Step("poll", final ? "timeout but still Connected" : "timeout not connected",
+            new Dictionary<string, object?> { ["status"] = ParseStatus(Status()) });
+        return final;
     }
 
     public sealed class PublicIpInfo

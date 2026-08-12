@@ -129,7 +129,7 @@ public class FormGeoHideWarp : Form
 
         _chkLowLatency.AutoSize = true;
         _chkLowLatency.Location = new Point(12, 210);
-        _chkLowLatency.Text = "Low latency (gaming) — tunnel_only DNS + Iran excludes (no slow WG retry)";
+        _chkLowLatency.Text = "Low latency (gaming) — tunnel_only before connect + Iran excludes (keeps proven tunnel)";
         _chkLowLatency.ForeColor = Color.WhiteSmoke;
         _chkLowLatency.BackColor = Color.Transparent;
         _chkLowLatency.Checked = true;
@@ -390,7 +390,12 @@ public class FormGeoHideWarp : Form
         SetBusy(true);
         _cts?.Dispose();
         _cts = new CancellationTokenSource();
-        var progress = new Progress<string>(Log);
+        var progress = new Progress<string>(msg =>
+        {
+            Log(msg);
+            WarpSessionLog.Step("ui", msg);
+        });
+        bool sessionEnded = false;
         try
         {
             // Fresh preflight every connect — start service, warn on VPN / existing WARP
@@ -435,6 +440,20 @@ public class FormGeoHideWarp : Form
             SyncOptionConflicts(fromUser: false);
             string protocol = censorship ? "MASQUE" : (_cmbProtocol.SelectedItem?.ToString() ?? "MASQUE");
 
+            WarpSessionLog.BeginSession(auto ? "auto-find" : "connect",
+                new Dictionary<string, object?>
+                {
+                    ["censorship"] = censorship,
+                    ["dpi"] = dpi,
+                    ["lowLatency"] = lowLatency,
+                    ["likelyIran"] = pre.LikelyIran,
+                    ["service"] = pre.ServiceRunning,
+                    ["otherVpn"] = pre.OtherVpnLikely,
+                    ["alreadyWarp"] = pre.AlreadyOnWarp,
+                    ["protocol"] = protocol,
+                });
+            Log("Session log → " + WarpSessionLog.CurrentLogPath);
+
             var opt = new WarpCli.CensorshipOptions
             {
                 Enabled = censorship,
@@ -476,6 +495,15 @@ public class FormGeoHideWarp : Form
             var (ok, message, ep, usedProtocol) = await WarpCli.TryConnectWithFallbackAsync(
                 endpointList, protocol, progress, _cts.Token, opt).ConfigureAwait(true);
             Log(message);
+            WarpSessionLog.End(ok, message,
+                new Dictionary<string, object?>
+                {
+                    ["endpoint"] = ep,
+                    ["protocol"] = usedProtocol,
+                });
+            sessionEnded = true;
+            if (!string.IsNullOrEmpty(WarpSessionLog.CurrentLogPath))
+                Log("Full diagnostics: " + WarpSessionLog.CurrentLogPath);
             if (!string.IsNullOrEmpty(usedProtocol) &&
                 !usedProtocol.Equals(_cmbProtocol.SelectedItem?.ToString(), StringComparison.OrdinalIgnoreCase))
             {
@@ -494,17 +522,23 @@ public class FormGeoHideWarp : Form
                 if (_chkImportAfterConnect.Checked)
                     await ImportSelectedPresetAsync(silent: true).ConfigureAwait(true);
                 CustomMessageBox.Show(this,
-                    message + "\n\nMinimize anytime — WARP stays connected.",
+                    message + "\n\nMinimize anytime — WARP stays connected.\n\nLog: " +
+                    (WarpSessionLog.CurrentLogPath ?? "(see UserData/GeoHideLogs)"),
                     "GeoHide", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             else
             {
-                CustomMessageBox.Show(this, message, "GeoHide", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                CustomMessageBox.Show(this,
+                    message + "\n\nLog: " + (WarpSessionLog.CurrentLogPath ?? "(see UserData/GeoHideLogs)"),
+                    "GeoHide", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
         catch (OperationCanceledException)
         {
             Log("Cancelled.");
+            if (!sessionEnded)
+                WarpSessionLog.End(false, "cancelled");
+            sessionEnded = true;
             try
             {
                 await Task.Run(() =>
@@ -519,6 +553,9 @@ public class FormGeoHideWarp : Form
         catch (Exception ex)
         {
             Log("Error: " + ex.Message);
+            if (!sessionEnded)
+                WarpSessionLog.End(false, "exception: " + ex.Message);
+            sessionEnded = true;
         }
         finally
         {

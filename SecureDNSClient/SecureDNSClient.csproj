@@ -9,7 +9,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Copyright>MSasanMH</Copyright>
     <Product>DNSveil</Product>
-    <Version>$(VersionPrefix)3.5.5</Version>
+    <Version>$(VersionPrefix)3.5.6</Version>
     <PackageIcon>SecureDNSClient.png</PackageIcon>
     <ApplicationIcon>SecureDNSClientMulti.ico</ApplicationIcon>
     <Platforms>AnyCPU;x64;x86</Platforms>

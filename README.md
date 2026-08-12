@@ -2,7 +2,7 @@
 
 Fork of [msasanmh/DNSveil](https://github.com/msasanmh/DNSveil) (formerly Secure DNS Client) with **GeoHide WARP**, Smart DNS rule presets, and related fixes.
 
-**Current release:** [v3.5.5](https://github.com/DanielNoohi/DNSveil/releases/tag/v3.5.5)
+**Current release:** [v3.5.6](https://github.com/DanielNoohi/DNSveil/releases/tag/v3.5.6)
 
 ![GitHub](https://img.shields.io/github/license/DanielNoohi/DNSveil)
 ![GitHub release](https://img.shields.io/github/v/release/DanielNoohi/DNSveil)
@@ -35,6 +35,10 @@ Then install [ASP.NET Core Runtime x86 v6.0.36](https://dotnet.microsoft.com/en-
 [This fork â€” latest release](https://github.com/DanielNoohi/DNSveil/releases/latest) Â· [Upstream releases](https://github.com/msasanmh/DNSveil/releases/latest)
 
 ---
+
+### What's new in this fork (v3.5.6)
+* **Gaming connect fix:** low-latency no longer re-applies `tunnel_only` after a proven connect (that was dropping MASQUE). Post-connect steps verify `Connected` + `warp=on` and restore the proven endpoint if needed.
+* **GeoHide session logs:** each Auto-find/Connect writes `UserData/GeoHideLogs/session-*.log` + `.jsonl` (endpoint attempts, status, warp trace, gaming steps) for later debugging.
 
 ### What's new in this fork (v3.5.5)
 * **Faster Auto-find:** fewer candidates/attempts, MASQUE-only scan (no slow WG second pass), Iran excludes cached once, no WG upgrade by default.

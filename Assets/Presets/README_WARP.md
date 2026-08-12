@@ -39,5 +39,6 @@ Traffic leaves through Cloudflare’s network. Destinations see a **Cloudflare e
 
 ## Notes
 
-- Full WARP mode is used (simplest reliable IP change).
+- Low-latency/gaming sets `tunnel_only` **before** connect and does not re-apply mode after a proven tunnel (re-applying dropped sessions).
+- Each Connect/Auto-find writes diagnostics under `UserData/GeoHideLogs/` (`session-*.log` + `session-*.jsonl`) for later debugging.
 - Core DNSveil features (DoH, Share Fragment) still do **not** replace a tunnel for IP hiding; WARP is the GeoHide companion.
