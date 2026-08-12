@@ -5,3 +5,16 @@
 .vs/
 *.7z
 *.zip
+
+# Real tool binaries are restored from upstream at pack time (too large for git).
+# Placeholders (11 bytes) stay tracked; local restored copies are ignored.
+SecureDNSClient/NecessaryFiles/dnslookup-X64.exe
+SecureDNSClient/NecessaryFiles/dnslookup-X86.exe
+SecureDNSClient/NecessaryFiles/SDCLookup-X64.exe
+SecureDNSClient/NecessaryFiles/SDCLookup-X86.exe
+SecureDNSClient/NecessaryFiles/SDCAgnosticServer-X64.exe
+SecureDNSClient/NecessaryFiles/SDCAgnosticServer-X86.exe
+SecureDNSClient/NecessaryFiles/goodbyedpi.exe
+SecureDNSClient/NecessaryFiles/WinDivert.dll
+SecureDNSClient/NecessaryFiles/WinDivert32.sys
+SecureDNSClient/NecessaryFiles/WinDivert64.sys

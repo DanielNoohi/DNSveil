@@ -29,7 +29,7 @@ public partial class FormMain : Form
         // Copy GeoHide presets into UserData when missing
         try { GeoHidePresets.EnsureUserPresetsCopied(); } catch (Exception) { }
 
-        // Tools → GeoHide WARP (pywarp-style warp-cli control)
+        // Tools → GeoHide WARP (created hidden; ScreenHighDpiScale positions it once)
         try
         {
             var btnGeoHide = new CustomControls.CustomButton
@@ -42,6 +42,7 @@ public partial class FormMain : Form
                 SelectionColor = Color.LightBlue,
                 Size = new Size(115, 27),
                 Location = new Point(200, 150),
+                Visible = false,
                 UseVisualStyleBackColor = true
             };
             btnGeoHide.Click += (_, _) =>
@@ -53,7 +54,6 @@ public partial class FormMain : Form
                 f.ShowDialog(this);
             };
             TabPageTools.Controls.Add(btnGeoHide);
-            btnGeoHide.BringToFront();
         }
         catch (Exception ex)
         {

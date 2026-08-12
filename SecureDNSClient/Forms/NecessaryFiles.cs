@@ -80,46 +80,52 @@ public partial class FormMain : Form
 
                 if (!File.Exists(SecureDNS.DnsLookup) || dnslookupResult == 1)
                 {
-                    if (arch == Architecture.X64)
-                        await File.WriteAllBytesAsync(SecureDNS.DnsLookup, NecessaryFiles.Resource1.dnslookup_X64);
-                    if (arch == Architecture.X86)
-                        await File.WriteAllBytesAsync(SecureDNS.DnsLookup, NecessaryFiles.Resource1.dnslookup_X86);
+                    byte[] data = arch == Architecture.X64 ? NecessaryFiles.Resource1.dnslookup_X64 : NecessaryFiles.Resource1.dnslookup_X86;
+                    if (!IsValidBinaryPayload(data))
+                        throw new InvalidOperationException("Embedded dnslookup binary is missing/placeholder. Use an official release package or restore NecessaryFiles.");
+                    await File.WriteAllBytesAsync(SecureDNS.DnsLookup, data);
                 }
 
                 if (!File.Exists(SecureDNS.SDCLookupPath) || sdclookupResult == 1)
                 {
-                    if (arch == Architecture.X64)
-                        await File.WriteAllBytesAsync(SecureDNS.SDCLookupPath, NecessaryFiles.Resource1.SDCLookup_X64);
-                    if (arch == Architecture.X86)
-                        await File.WriteAllBytesAsync(SecureDNS.SDCLookupPath, NecessaryFiles.Resource1.SDCLookup_X86);
+                    byte[] data = arch == Architecture.X64 ? NecessaryFiles.Resource1.SDCLookup_X64 : NecessaryFiles.Resource1.SDCLookup_X86;
+                    if (!IsValidBinaryPayload(data))
+                        throw new InvalidOperationException("Embedded SDCLookup binary is missing/placeholder. Use an official release package or restore NecessaryFiles.");
+                    await File.WriteAllBytesAsync(SecureDNS.SDCLookupPath, data);
                 }
 
                 if (!File.Exists(SecureDNS.AgnosticServerPath) || sdcagnosticserverResult == 1)
                 {
-                    if (arch == Architecture.X64)
-                        await File.WriteAllBytesAsync(SecureDNS.AgnosticServerPath, NecessaryFiles.Resource1.SDCAgnosticServer_X64);
-                    if (arch == Architecture.X86)
-                        await File.WriteAllBytesAsync(SecureDNS.AgnosticServerPath, NecessaryFiles.Resource1.SDCAgnosticServer_X86);
+                    byte[] data = arch == Architecture.X64 ? NecessaryFiles.Resource1.SDCAgnosticServer_X64 : NecessaryFiles.Resource1.SDCAgnosticServer_X86;
+                    if (!IsValidBinaryPayload(data))
+                        throw new InvalidOperationException("Embedded SDCAgnosticServer binary is missing/placeholder. Use an official release package or restore NecessaryFiles.");
+                    await File.WriteAllBytesAsync(SecureDNS.AgnosticServerPath, data);
                 }
 
                 if (goodbyedpiResult == 1 || fixUpdateGoodbyDpi)
                     await DeleteGoodbyeDpiAndWinDivertServices_Async();
 
                 if (!File.Exists(SecureDNS.GoodbyeDpi) || goodbyedpiResult == 1 || fixUpdateGoodbyDpi)
-                    if (arch == Architecture.X64 || arch == Architecture.X86)
-                        await File.WriteAllBytesAsync(SecureDNS.GoodbyeDpi, NecessaryFiles.Resource1.goodbyedpi);
+                {
+                    byte[] data = NecessaryFiles.Resource1.goodbyedpi;
+                    if (!IsValidBinaryPayload(data))
+                        throw new InvalidOperationException("Embedded goodbyedpi binary is missing/placeholder.");
+                    await File.WriteAllBytesAsync(SecureDNS.GoodbyeDpi, data);
+                }
 
                 if (!File.Exists(SecureDNS.WinDivert) || fixUpdateGoodbyDpi)
-                    if (arch == Architecture.X64 || arch == Architecture.X86)
-                        await File.WriteAllBytesAsync(SecureDNS.WinDivert, NecessaryFiles.Resource1.WinDivert);
+                {
+                    byte[] data = NecessaryFiles.Resource1.WinDivert;
+                    if (!IsValidBinaryPayload(data))
+                        throw new InvalidOperationException("Embedded WinDivert binary is missing/placeholder.");
+                    await File.WriteAllBytesAsync(SecureDNS.WinDivert, data);
+                }
 
                 if (!File.Exists(SecureDNS.WinDivert32) || fixUpdateGoodbyDpi)
-                    if (arch == Architecture.X64 || arch == Architecture.X86)
-                        await File.WriteAllBytesAsync(SecureDNS.WinDivert32, NecessaryFiles.Resource1.WinDivert32);
+                    await File.WriteAllBytesAsync(SecureDNS.WinDivert32, NecessaryFiles.Resource1.WinDivert32);
 
                 if (!File.Exists(SecureDNS.WinDivert64) || fixUpdateGoodbyDpi)
-                    if (arch == Architecture.X64 || arch == Architecture.X86)
-                        await File.WriteAllBytesAsync(SecureDNS.WinDivert64, NecessaryFiles.Resource1.WinDivert64);
+                    await File.WriteAllBytesAsync(SecureDNS.WinDivert64, NecessaryFiles.Resource1.WinDivert64);
 
                 // Update Old Version Numbers
                 await File.WriteAllBytesAsync(SecureDNS.BinariesVersionPath, NecessaryFiles.Resource1.versions);
@@ -139,5 +145,8 @@ public partial class FormMain : Form
             }
         }
     }
+
+    /// <summary>Rejects git placeholder stubs (e.g. 11-byte "Placeholder") so we never write a broken AgnosticServer.</summary>
+    private static bool IsValidBinaryPayload(byte[]? data) => data != null && data.Length >= 1024;
 
 }

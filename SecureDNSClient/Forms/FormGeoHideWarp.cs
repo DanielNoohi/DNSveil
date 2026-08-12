@@ -1,6 +1,5 @@
 using CustomControls;
 using MsmhToolsClass;
-using MsmhToolsWinFormsClass.Themes;
 using SecureDNSClient.GeoHide;
 using System.Diagnostics;
 
@@ -12,11 +11,16 @@ namespace SecureDNSClient;
 /// </summary>
 public class FormGeoHideWarp : Form
 {
-    private readonly CustomLabel _lblStatus = new();
-    private readonly CustomLabel _lblIp = new();
-    private readonly CustomComboBox _cmbEndpoint = new();
-    private readonly CustomComboBox _cmbProtocol = new();
-    private readonly CustomComboBox _cmbPreset = new();
+    private readonly Label _lblHelp = new();
+    private readonly Label _lblStatus = new();
+    private readonly Label _lblIp = new();
+    private readonly Label _lblEp = new();
+    private readonly Label _lblProto = new();
+    private readonly Label _lblPreset = new();
+    private readonly Label _lblFoot = new();
+    private readonly ComboBox _cmbEndpoint = new();
+    private readonly ComboBox _cmbProtocol = new();
+    private readonly ComboBox _cmbPreset = new();
     private readonly CustomButton _btnRefresh = new();
     private readonly CustomButton _btnConnect = new();
     private readonly CustomButton _btnDisconnect = new();
@@ -25,86 +29,70 @@ public class FormGeoHideWarp : Form
     private readonly CustomButton _btnInstall = new();
     private readonly CustomButton _btnImportPreset = new();
     private readonly CustomButton _btnHelp = new();
-    private readonly CustomRichTextBox _log = new();
-    private readonly CustomCheckBox _chkImportAfterConnect = new();
+    private readonly TextBox _log = new();
+    private readonly CheckBox _chkImportAfterConnect = new();
     private CancellationTokenSource? _cts;
     private bool _busy;
+    private bool _reloadingEndpoints;
 
     public FormGeoHideWarp()
     {
         Text = "GeoHide — Cloudflare WARP";
-        Width = 660;
-        Height = 560;
+        ClientSize = new Size(640, 520);
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
+        BackColor = Color.FromArgb(32, 32, 32);
+        ForeColor = Color.WhiteSmoke;
+        Font = new Font("Segoe UI", 9F);
 
-        Theme.LoadTheme(this, Theme.Themes.Dark);
+        SuspendLayout();
 
-        var root = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 7,
-            Padding = new Padding(12),
-        };
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        Controls.Add(root);
+        _lblHelp.AutoSize = false;
+        _lblHelp.Location = new Point(12, 10);
+        _lblHelp.Size = new Size(616, 48);
+        _lblHelp.Text = "Uses official Cloudflare WARP (warp-cli). Connect so destinations see a Cloudflare exit IP — not your ISP. Encrypted DNS / Shecan alone cannot change your public IP.";
 
-        var help = new CustomLabel
-        {
-            AutoSize = true,
-            MaximumSize = new Size(620, 0),
-            Text = "Uses official Cloudflare WARP (warp-cli), like PyWarp. Connect so destinations see a Cloudflare exit IP — not your ISP. Encrypted DNS / Shecan alone cannot change your public IP."
-        };
-        root.Controls.Add(help, 0, 0);
-
-        var rowStatus = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
-        _lblStatus.Text = "Status: …";
         _lblStatus.AutoSize = true;
-        _lblStatus.Margin = new Padding(0, 8, 16, 8);
-        _lblIp.Text = "Public IP: …";
+        _lblStatus.Location = new Point(12, 66);
+        _lblStatus.Text = "Status: …";
         _lblIp.AutoSize = true;
-        _lblIp.Margin = new Padding(0, 8, 8, 8);
-        _btnRefresh.Text = "Refresh";
-        _btnRefresh.Size = new Size(90, 28);
-        _btnRefresh.Click += async (_, _) => await RefreshStatusAsync();
-        rowStatus.Controls.Add(_lblStatus);
-        rowStatus.Controls.Add(_lblIp);
-        rowStatus.Controls.Add(_btnRefresh);
-        root.Controls.Add(rowStatus, 0, 1);
+        _lblIp.Location = new Point(260, 66);
+        _lblIp.Text = "Public IP: …";
 
-        var rowEp = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
-        var lblEp = new CustomLabel { Text = "Endpoint", AutoSize = true, Margin = new Padding(0, 8, 8, 0) };
+        StyleBtn(_btnRefresh, "Refresh", new Point(520, 60), 90);
+        _btnRefresh.Click += async (_, _) => await RefreshStatusAsync();
+
+        _lblEp.AutoSize = true;
+        _lblEp.Location = new Point(12, 100);
+        _lblEp.Text = "Endpoint";
+        _cmbEndpoint.Location = new Point(80, 96);
         _cmbEndpoint.Size = new Size(280, 28);
         _cmbEndpoint.DropDownStyle = ComboBoxStyle.DropDown;
-        var lblProto = new CustomLabel { Text = "Protocol", AutoSize = true, Margin = new Padding(12, 8, 8, 0) };
+        StyleCombo(_cmbEndpoint);
+
+        _lblProto.AutoSize = true;
+        _lblProto.Location = new Point(380, 100);
+        _lblProto.Text = "Protocol";
+        _cmbProtocol.Location = new Point(440, 96);
         _cmbProtocol.Size = new Size(120, 28);
         _cmbProtocol.DropDownStyle = ComboBoxStyle.DropDownList;
+        StyleCombo(_cmbProtocol);
         _cmbProtocol.Items.AddRange(new object[] { "WireGuard", "MASQUE" });
+        _cmbProtocol.SelectedIndexChanged += (_, _) =>
+        {
+            if (_reloadingEndpoints) return;
+            ReloadEndpointList();
+        };
         _cmbProtocol.SelectedIndex = 0;
-        _cmbProtocol.SelectedIndexChanged += (_, _) => ReloadEndpointList();
-        ReloadEndpointList();
-        rowEp.Controls.Add(lblEp);
-        rowEp.Controls.Add(_cmbEndpoint);
-        rowEp.Controls.Add(lblProto);
-        rowEp.Controls.Add(_cmbProtocol);
-        root.Controls.Add(rowEp, 0, 2);
 
-        var rowBtn = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        StyleBtn(_btnConnect, "Connect", 100);
-        StyleBtn(_btnDisconnect, "Disconnect", 100);
-        StyleBtn(_btnAuto, "Auto-find endpoint", 140);
-        StyleBtn(_btnCancel, "Cancel", 80);
-        StyleBtn(_btnInstall, "Get WARP…", 100);
-        StyleBtn(_btnHelp, "Help", 70);
+        StyleBtn(_btnConnect, "Connect", new Point(12, 136), 100);
+        StyleBtn(_btnDisconnect, "Disconnect", new Point(120, 136), 100);
+        StyleBtn(_btnAuto, "Auto-find", new Point(228, 136), 100);
+        StyleBtn(_btnCancel, "Cancel", new Point(336, 136), 80);
+        StyleBtn(_btnInstall, "Get WARP…", new Point(424, 136), 100);
+        StyleBtn(_btnHelp, "Help", new Point(532, 136), 80);
         _btnCancel.Enabled = false;
         _btnConnect.Click += async (_, _) => await ConnectAsync(auto: false);
         _btnDisconnect.Click += async (_, _) => await DisconnectAsync();
@@ -113,18 +101,14 @@ public class FormGeoHideWarp : Form
         _btnInstall.Click += (_, _) => OpenLinks.OpenUrl("https://one.one.one.one/");
         _btnHelp.Click += (_, _) => CustomMessageBox.Show(this, GeoHidePresets.HelpSummary, "GeoHide help",
             MessageBoxButtons.OK, MessageBoxIcon.Information);
-        rowBtn.Controls.Add(_btnConnect);
-        rowBtn.Controls.Add(_btnDisconnect);
-        rowBtn.Controls.Add(_btnAuto);
-        rowBtn.Controls.Add(_btnCancel);
-        rowBtn.Controls.Add(_btnInstall);
-        rowBtn.Controls.Add(_btnHelp);
-        root.Controls.Add(rowBtn, 0, 3);
 
-        var rowPreset = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        var lblPreset = new CustomLabel { Text = "Rules preset", AutoSize = true, Margin = new Padding(0, 8, 8, 0) };
+        _lblPreset.AutoSize = true;
+        _lblPreset.Location = new Point(12, 178);
+        _lblPreset.Text = "Rules preset";
+        _cmbPreset.Location = new Point(100, 174);
         _cmbPreset.Size = new Size(260, 28);
         _cmbPreset.DropDownStyle = ComboBoxStyle.DropDownList;
+        StyleCombo(_cmbPreset);
         _cmbPreset.Items.AddRange(new object[]
         {
             "Shecan anti-sanction (web/dev)",
@@ -132,28 +116,50 @@ public class FormGeoHideWarp : Form
             "Gaming Smart DNS template"
         });
         _cmbPreset.SelectedIndex = 0;
-        StyleBtn(_btnImportPreset, "Import into Rules", 140);
+        StyleBtn(_btnImportPreset, "Import into Rules", new Point(372, 172), 150);
         _btnImportPreset.Click += async (_, _) => await ImportSelectedPresetAsync(silent: false);
-        _chkImportAfterConnect.Text = "Also import selected preset after successful connect";
+
         _chkImportAfterConnect.AutoSize = true;
+        _chkImportAfterConnect.Location = new Point(12, 210);
+        _chkImportAfterConnect.Text = "Also import selected preset after successful connect";
+        _chkImportAfterConnect.ForeColor = Color.WhiteSmoke;
+        _chkImportAfterConnect.BackColor = Color.Transparent;
         _chkImportAfterConnect.Checked = false;
-        rowPreset.Controls.Add(lblPreset);
-        rowPreset.Controls.Add(_cmbPreset);
-        rowPreset.Controls.Add(_btnImportPreset);
-        rowPreset.Controls.Add(_chkImportAfterConnect);
-        root.Controls.Add(rowPreset, 0, 4);
 
-        _log.Dock = DockStyle.Fill;
+        _log.Location = new Point(12, 240);
+        _log.Size = new Size(616, 230);
+        _log.Multiline = true;
+        _log.ScrollBars = ScrollBars.Vertical;
         _log.ReadOnly = true;
-        root.Controls.Add(_log, 0, 5);
+        _log.BackColor = Color.FromArgb(24, 24, 24);
+        _log.ForeColor = Color.Gainsboro;
+        _log.BorderStyle = BorderStyle.FixedSingle;
 
-        var foot = new CustomLabel
+        _lblFoot.AutoSize = false;
+        _lblFoot.Location = new Point(12, 478);
+        _lblFoot.Size = new Size(616, 36);
+        _lblFoot.Text = "Tip: after importing rules while DNS/Share is running, DNSveil re-applies them. Keep WARP Connected while you need a Cloudflare exit IP.";
+
+        Controls.AddRange(new Control[]
         {
-            AutoSize = true,
-            MaximumSize = new Size(620, 0),
-            Text = "Tip: after importing rules while DNS/Share is running, DNSveil re-applies them automatically. Keep WARP Connected while you need a Cloudflare exit IP."
-        };
-        root.Controls.Add(foot, 0, 6);
+            _lblHelp, _lblStatus, _lblIp, _btnRefresh,
+            _lblEp, _cmbEndpoint, _lblProto, _cmbProtocol,
+            _btnConnect, _btnDisconnect, _btnAuto, _btnCancel, _btnInstall, _btnHelp,
+            _lblPreset, _cmbPreset, _btnImportPreset, _chkImportAfterConnect,
+            _log, _lblFoot
+        });
+
+        foreach (Control c in Controls)
+        {
+            if (c is Label lbl)
+            {
+                lbl.ForeColor = Color.WhiteSmoke;
+                lbl.BackColor = Color.Transparent;
+            }
+        }
+
+        ResumeLayout(true);
+        ReloadEndpointList();
 
         Shown += async (_, _) =>
         {
@@ -173,6 +179,13 @@ public class FormGeoHideWarp : Form
         };
     }
 
+    private static void StyleCombo(ComboBox c)
+    {
+        c.BackColor = Color.FromArgb(45, 45, 45);
+        c.ForeColor = Color.White;
+        c.FlatStyle = FlatStyle.Flat;
+    }
+
     private GeoHidePresets.PresetKind SelectedPresetKind() => _cmbPreset.SelectedIndex switch
     {
         1 => GeoHidePresets.PresetKind.ViaUpstreamProxy,
@@ -182,26 +195,36 @@ public class FormGeoHideWarp : Form
 
     private void ReloadEndpointList()
     {
-        string protocol = _cmbProtocol.SelectedItem?.ToString() ?? "WireGuard";
-        string keep = _cmbEndpoint.Text;
-        _cmbEndpoint.Items.Clear();
-        _cmbEndpoint.Items.Add("(Cloudflare default)");
-        foreach (string ep in WarpCli.EnumerateEndpointCandidates(protocol, 40))
-            _cmbEndpoint.Items.Add(ep);
-        if (!string.IsNullOrWhiteSpace(keep) && _cmbEndpoint.Items.Contains(keep))
-            _cmbEndpoint.Text = keep;
-        else
-            _cmbEndpoint.SelectedIndex = 0;
+        if (_reloadingEndpoints) return;
+        _reloadingEndpoints = true;
+        try
+        {
+            string protocol = _cmbProtocol.SelectedItem?.ToString() ?? "WireGuard";
+            string keep = _cmbEndpoint.Text;
+            _cmbEndpoint.BeginUpdate();
+            _cmbEndpoint.Items.Clear();
+            _cmbEndpoint.Items.Add("(Cloudflare default)");
+            foreach (string ep in WarpCli.EnumerateEndpointCandidates(protocol, 40))
+                _cmbEndpoint.Items.Add(ep);
+            if (!string.IsNullOrWhiteSpace(keep) && _cmbEndpoint.Items.Contains(keep))
+                _cmbEndpoint.Text = keep;
+            else
+                _cmbEndpoint.SelectedIndex = 0;
+            _cmbEndpoint.EndUpdate();
+        }
+        finally { _reloadingEndpoints = false; }
     }
 
-    private static void StyleBtn(CustomButton b, string text, int width)
+    private static void StyleBtn(CustomButton b, string text, Point loc, int width)
     {
         b.Text = text;
+        b.Location = loc;
         b.Size = new Size(width, 28);
-        b.BorderColor = Color.Blue;
+        b.BorderColor = Color.DodgerBlue;
         b.FlatStyle = FlatStyle.Flat;
         b.RoundedCorners = 5;
-        b.Margin = new Padding(0, 4, 8, 4);
+        b.ForeColor = Color.White;
+        b.BackColor = Color.FromArgb(50, 50, 50);
     }
 
     private void Log(string msg)

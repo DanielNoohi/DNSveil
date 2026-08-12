@@ -2,7 +2,7 @@
 
 Fork of [msasanmh/DNSveil](https://github.com/msasanmh/DNSveil) (formerly Secure DNS Client) with **GeoHide WARP**, Smart DNS rule presets, and related fixes.
 
-**Current release:** [v3.5.0](https://github.com/DanielNoohi/DNSveil/releases/tag/v3.5.0)
+**Current release:** [v3.5.1](https://github.com/DanielNoohi/DNSveil/releases/tag/v3.5.1)
 
 ![GitHub](https://img.shields.io/github/license/DanielNoohi/DNSveil)
 ![GitHub release](https://img.shields.io/github/v/release/DanielNoohi/DNSveil)
@@ -36,7 +36,7 @@ Then install [ASP.NET Core Runtime x86 v6.0.36](https://dotnet.microsoft.com/en-
 
 ---
 
-### What's new in this fork (v3.5.0)
+### What's new in this fork (v3.5.1)
 * **GeoHide WARP reliability:** strict Connected parsing (no more "Not Connected" false positives), `warp=on` egress verification, longer connect polls, service-running check, Cancel resets endpoint, MASQUE fallback syncs protocol UI.
 * **Rules that stick:** importing presets re-applies rules to a running DNS / Share proxy; Shecan / gaming / upstream presets selectable in the GeoHide window.
 * **Update check:** fork-only channel (won't advertise upstream SDC as this fork), `finally` clears "checking" lock, proxy retry on fork URL.

@@ -546,8 +546,11 @@ public partial class FormMain
             Control[] geoHideBtns = TabPageTools.Controls.Find("CustomButtonToolsGeoHideWarp", false);
             if (geoHideBtns.Length > 0)
             {
-                geoHideBtns[0].Left = CustomButtonBenchmark.Left;
-                geoHideBtns[0].Top = CustomButtonBenchmark.Bottom + spaceV;
+                Control g = geoHideBtns[0];
+                g.Left = CustomButtonBenchmark.Left;
+                g.Top = CustomButtonBenchmark.Bottom + spaceV;
+                g.Visible = true;
+                g.BringToFront();
             }
 
             //// Settings
