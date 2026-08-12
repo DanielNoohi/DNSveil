@@ -35,6 +35,8 @@ public class FormGeoHideWarp : Form
     private readonly CheckBox _chkImportAfterConnect = new();
     private readonly CheckBox _chkCensorship = new();
     private readonly CheckBox _chkDpiAssist = new();
+    private readonly CheckBox _chkLowLatency = new();
+    private readonly CustomButton _btnMinimize = new();
     private CancellationTokenSource? _cts;
     private bool _busy;
     private bool _reloadingEndpoints;
@@ -42,11 +44,13 @@ public class FormGeoHideWarp : Form
     public FormGeoHideWarp()
     {
         Text = "GeoHide — Cloudflare WARP";
-        ClientSize = new Size(640, 560);
+        ClientSize = new Size(640, 590);
         StartPosition = FormStartPosition.CenterParent;
-        FormBorderStyle = FormBorderStyle.FixedDialog;
+        FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        MinimizeBox = false;
+        MinimizeBox = true;
+        ShowInTaskbar = true;
+        ShowIcon = true;
         BackColor = Color.FromArgb(32, 32, 32);
         ForeColor = Color.WhiteSmoke;
         Font = new Font("Segoe UI", 9F);
@@ -91,17 +95,19 @@ public class FormGeoHideWarp : Form
         };
         _cmbProtocol.SelectedIndex = 0; // MASQUE first under censorship
 
-        StyleBtn(_btnConnect, "Connect", new Point(12, 126), 100);
-        StyleBtn(_btnDisconnect, "Disconnect", new Point(120, 126), 100);
-        StyleBtn(_btnAuto, "Auto-find", new Point(228, 126), 100);
-        StyleBtn(_btnCancel, "Cancel", new Point(336, 126), 80);
-        StyleBtn(_btnInstall, "Get WARP…", new Point(424, 126), 100);
-        StyleBtn(_btnHelp, "Help", new Point(532, 126), 80);
+        StyleBtn(_btnConnect, "Connect", new Point(12, 126), 90);
+        StyleBtn(_btnDisconnect, "Disconnect", new Point(108, 126), 90);
+        StyleBtn(_btnAuto, "Auto-find", new Point(204, 126), 90);
+        StyleBtn(_btnCancel, "Cancel", new Point(300, 126), 70);
+        StyleBtn(_btnMinimize, "Minimize", new Point(376, 126), 80);
+        StyleBtn(_btnInstall, "Get WARP…", new Point(462, 126), 90);
+        StyleBtn(_btnHelp, "Help", new Point(558, 126), 64);
         _btnCancel.Enabled = false;
         _btnConnect.Click += async (_, _) => await ConnectAsync(auto: false);
         _btnDisconnect.Click += async (_, _) => await DisconnectAsync();
         _btnAuto.Click += async (_, _) => await ConnectAsync(auto: true);
         _btnCancel.Click += (_, _) => { try { _cts?.Cancel(); } catch { } };
+        _btnMinimize.Click += (_, _) => { WindowState = FormWindowState.Minimized; };
         _btnInstall.Click += (_, _) => OpenLinks.OpenUrl("https://one.one.one.one/");
         _btnHelp.Click += (_, _) => CustomMessageBox.Show(this, GeoHidePresets.HelpSummary, "GeoHide help",
             MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -123,15 +129,22 @@ public class FormGeoHideWarp : Form
 
         _chkDpiAssist.AutoSize = true;
         _chkDpiAssist.Location = new Point(12, 186);
-        _chkDpiAssist.Text = "DPI assist (GoodbyeDPI TLS fragment — GFW-knocker style)";
+        _chkDpiAssist.Text = "DPI assist (GoodbyeDPI TLS fragment — stopped after connect)";
         _chkDpiAssist.ForeColor = Color.WhiteSmoke;
         _chkDpiAssist.BackColor = Color.Transparent;
         _chkDpiAssist.Checked = true;
 
+        _chkLowLatency.AutoSize = true;
+        _chkLowLatency.Location = new Point(12, 210);
+        _chkLowLatency.Text = "Low latency (gaming) — tunnel_only DNS, WG upgrade, exclude Iran ranges";
+        _chkLowLatency.ForeColor = Color.WhiteSmoke;
+        _chkLowLatency.BackColor = Color.Transparent;
+        _chkLowLatency.Checked = true;
+
         _lblPreset.AutoSize = true;
-        _lblPreset.Location = new Point(12, 218);
+        _lblPreset.Location = new Point(12, 242);
         _lblPreset.Text = "Rules preset";
-        _cmbPreset.Location = new Point(100, 214);
+        _cmbPreset.Location = new Point(100, 238);
         _cmbPreset.Size = new Size(260, 28);
         _cmbPreset.DropDownStyle = ComboBoxStyle.DropDownList;
         StyleCombo(_cmbPreset);
@@ -142,17 +155,17 @@ public class FormGeoHideWarp : Form
             "Gaming Smart DNS template"
         });
         _cmbPreset.SelectedIndex = 0;
-        StyleBtn(_btnImportPreset, "Import into Rules", new Point(372, 212), 150);
+        StyleBtn(_btnImportPreset, "Import into Rules", new Point(372, 236), 150);
         _btnImportPreset.Click += async (_, _) => await ImportSelectedPresetAsync(silent: false);
 
         _chkImportAfterConnect.AutoSize = true;
-        _chkImportAfterConnect.Location = new Point(12, 248);
+        _chkImportAfterConnect.Location = new Point(12, 272);
         _chkImportAfterConnect.Text = "Also import selected preset after successful connect";
         _chkImportAfterConnect.ForeColor = Color.WhiteSmoke;
         _chkImportAfterConnect.BackColor = Color.Transparent;
         _chkImportAfterConnect.Checked = false;
 
-        _log.Location = new Point(12, 278);
+        _log.Location = new Point(12, 300);
         _log.Size = new Size(616, 230);
         _log.Multiline = true;
         _log.ScrollBars = ScrollBars.Vertical;
@@ -162,16 +175,16 @@ public class FormGeoHideWarp : Form
         _log.BorderStyle = BorderStyle.FixedSingle;
 
         _lblFoot.AutoSize = false;
-        _lblFoot.Location = new Point(12, 514);
-        _lblFoot.Size = new Size(616, 40);
-        _lblFoot.Text = "Auto-find under censorship: GoodbyeDPI fragment → MASQUE h3-with-h2-fallback → IRCF/CF :443 scan → connect. Keep WARP Connected while you need a Cloudflare exit IP.";
+        _lblFoot.Location = new Point(12, 538);
+        _lblFoot.Size = new Size(616, 44);
+        _lblFoot.Text = "After connect: use Minimize (title bar or button) — WARP stays up. Low-latency stops DPI assist and keeps Iran traffic off the tunnel.";
 
         Controls.AddRange(new Control[]
         {
             _lblHelp, _lblStatus, _lblIp, _btnRefresh,
             _lblEp, _cmbEndpoint, _lblProto, _cmbProtocol,
-            _btnConnect, _btnDisconnect, _btnAuto, _btnCancel, _btnInstall, _btnHelp,
-            _chkCensorship, _chkDpiAssist,
+            _btnConnect, _btnDisconnect, _btnAuto, _btnCancel, _btnMinimize, _btnInstall, _btnHelp,
+            _chkCensorship, _chkDpiAssist, _chkLowLatency,
             _lblPreset, _cmbPreset, _btnImportPreset, _chkImportAfterConnect,
             _log, _lblFoot
         });
@@ -282,6 +295,8 @@ public class FormGeoHideWarp : Form
         _cmbPreset.Enabled = !busy;
         _chkCensorship.Enabled = !busy;
         _chkDpiAssist.Enabled = !busy;
+        _chkLowLatency.Enabled = !busy;
+        _btnMinimize.Enabled = true; // always allow minimize
     }
 
     private async Task RefreshStatusAsync()
@@ -343,6 +358,7 @@ public class FormGeoHideWarp : Form
             {
                 Enabled = censorship,
                 DpiAssist = dpi,
+                LowLatency = _chkLowLatency.Checked,
                 MaxCandidates = censorship ? 120 : 32,
                 MaxConnectAttempts = censorship ? 20 : 12,
                 CidrSamplePerRange = censorship ? 56 : 16,
@@ -409,7 +425,8 @@ public class FormGeoHideWarp : Form
                 if (_chkImportAfterConnect.Checked)
                     await ImportSelectedPresetAsync(silent: true).ConfigureAwait(true);
                 CustomMessageBox.Show(this,
-                    message + "\n\nKeep WARP Connected while you need remotes to see the Cloudflare exit IP.",
+                    message + "\n\nMinimize this window anytime — WARP stays connected.\n" +
+                    "For gaming keep \"Low latency\" checked (stops DPI assist after connect).",
                     "GeoHide", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             else

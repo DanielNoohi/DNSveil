@@ -2,7 +2,7 @@
 
 Fork of [msasanmh/DNSveil](https://github.com/msasanmh/DNSveil) (formerly Secure DNS Client) with **GeoHide WARP**, Smart DNS rule presets, and related fixes.
 
-**Current release:** [v3.5.3](https://github.com/DanielNoohi/DNSveil/releases/tag/v3.5.3)
+**Current release:** [v3.5.4](https://github.com/DanielNoohi/DNSveil/releases/tag/v3.5.4)
 
 ![GitHub](https://img.shields.io/github/license/DanielNoohi/DNSveil)
 ![GitHub release](https://img.shields.io/github/v/release/DanielNoohi/DNSveil)
@@ -35,6 +35,10 @@ Then install [ASP.NET Core Runtime x86 v6.0.36](https://dotnet.microsoft.com/en-
 [This fork â€” latest release](https://github.com/DanielNoohi/DNSveil/releases/latest) Â· [Upstream releases](https://github.com/msasanmh/DNSveil/releases/latest)
 
 ---
+
+### What's new in this fork (v3.5.4)
+* **GeoHide minimize:** title-bar minimize + Minimize button (dialog could not minimize before).
+* **Gaming / low latency:** stop GoodbyeDPI after connect (WinDivert was adding latency), `tunnel_only` mode (DNSveil keeps DNS), try WireGuard upgrade after MASQUE, exclude Iran/domestic ranges from the tunnel.
 
 ### What's new in this fork (v3.5.3)
 * **Iran censorship mode for GeoHide:** IRCF live endpoints + Cloudflare WARP CIDR clean-IP scan, MASQUE/H2-first (`h3-with-h2-fallback`), optional GoodbyeDPI TLS ClientHello fragment (GFW-knocker-style) before connect.

@@ -89,6 +89,11 @@ public static class WarpCli
         public bool Enabled { get; init; } = true;
         /// <summary>Start GoodbyeDPI TLS fragment before connect (GFW-knocker style).</summary>
         public bool DpiAssist { get; init; } = true;
+        /// <summary>
+        /// After connect: stop DPI assist, prefer tunnel_only (DNSveil owns DNS),
+        /// try WireGuard upgrade, exclude domestic IR ranges from the tunnel.
+        /// </summary>
+        public bool LowLatency { get; init; } = true;
         public int MaxCandidates { get; init; } = 96;
         public int MaxConnectAttempts { get; init; } = 18;
         public int ProbeTimeoutMs { get; init; } = 500;
@@ -206,6 +211,8 @@ public static class WarpCli
     public static Result Disconnect() => Run("disconnect");
     public static Result Status() => Run("status");
     public static Result SetModeWarp() => Run("mode", "warp");
+    /// <summary>Tunnel without WARP DNS proxy — lower overhead when DNSveil already handles DNS.</summary>
+    public static Result SetModeTunnelOnly() => Run("mode", "tunnel_only");
     public static Result SetProtocol(string protocol) => Run("tunnel", "protocol", "set", protocol);
     public static Result SetMasqueOptions(string options) => Run("tunnel", "masque-options", "set", options);
     public static Result SetEndpoint(string endpoint) => Run("tunnel", "endpoint", "set", endpoint);
@@ -462,9 +469,22 @@ public static class WarpCli
         Disconnect();
 
         if (!EnsureRegistration(progress))
+        {
+            if (censorship.DpiAssist) await WarpDpiAssist.StopAsync().ConfigureAwait(false);
             return (false, "WARP registration failed. Open the official WARP app once (or enable DPI assist), accept the ToS, then retry.", null, preferredProtocol);
+        }
 
-        SetModeWarp();
+        // Gaming / low-latency: skip WARP DNS (DNSveil already does DNS) — less hop/overhead.
+        if (censorship.LowLatency)
+        {
+            progress?.Report("Mode: tunnel_only (DNS stays with DNSveil — lower gaming latency)…");
+            SetModeTunnelOnly();
+            Run("debug", "high-timeouts", "disable");
+        }
+        else
+        {
+            SetModeWarp();
+        }
 
         List<string> list = endpoints?.Where(e => !string.IsNullOrWhiteSpace(e)).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
                             ?? new List<string>();
@@ -475,6 +495,7 @@ public static class WarpCli
         }
 
         // Protocol order under censorship: MASQUE (H2 TCP fallback) first, then WireGuard.
+        // Low-latency still starts MASQUE for censorship, then upgrades to WG after connect.
         string[] protocols = censorship.Enabled
             ? (preferredProtocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase)
                 ? new[] { "MASQUE", "WireGuard" }
@@ -506,7 +527,10 @@ public static class WarpCli
                 progress?.Report($"Connecting with Cloudflare default endpoint ({protocol})…");
                 ResetEndpoint();
                 if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: censorship.Enabled).ConfigureAwait(false))
-                    return (true, $"Connected via default endpoint ({protocol}).", null, protocol);
+                {
+                    return await FinishConnectedAsync(
+                        $"Connected via default endpoint ({protocol}).", null, protocol, censorship, progress, ct).ConfigureAwait(false);
+                }
                 progress?.Report("Default endpoint failed: " + ParseStatus(Status()));
                 continue;
             }
@@ -523,7 +547,7 @@ public static class WarpCli
             }
             else
             {
-                progress?.Report($"{reachable.Count} endpoints look reachable — connecting…");
+                progress?.Report($"{reachable.Count} endpoints look reachable (fastest first) — connecting…");
             }
 
             int n = 0;
@@ -544,7 +568,10 @@ public static class WarpCli
                 {
                     PublicIpInfo info = await FetchPublicIpInfoAsync(5000).ConfigureAwait(false);
                     if (info.WarpOn != false)
-                        return (true, $"Connected via {endpoint} ({protocol}).", endpoint, protocol);
+                    {
+                        return await FinishConnectedAsync(
+                            $"Connected via {endpoint} ({protocol}).", endpoint, protocol, censorship, progress, ct).ConfigureAwait(false);
+                    }
                     progress?.Report("Status connected but warp=off — trying next…");
                 }
                 else
@@ -563,8 +590,13 @@ public static class WarpCli
             SetProtocol("MASQUE");
             SetMasqueOptions("h3-with-h2-fallback");
             if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: true).ConfigureAwait(false))
-                return (true, "Connected via default endpoint (MASQUE).", null, "MASQUE");
+            {
+                return await FinishConnectedAsync(
+                    "Connected via default endpoint (MASQUE).", null, "MASQUE", censorship, progress, ct).ConfigureAwait(false);
+            }
         }
+
+        if (censorship.DpiAssist) await WarpDpiAssist.StopAsync().ConfigureAwait(false);
 
         return (false,
             "Could not connect under censorship. Tips: keep \"DPI assist\" on, try again (new CF IPs), " +
@@ -572,6 +604,145 @@ public static class WarpCli
             "If WARP IPs themselves are fully blocked, official warp-cli cannot fake MASQUE SNI — " +
             "tools like usque/masque-plus with custom SNI may be required as a last resort.",
             null, preferredProtocol);
+    }
+
+    /// <summary>
+    /// Post-connect latency pass: stop WinDivert fragmentor, optional WG upgrade, IR split-tunnel excludes.
+    /// </summary>
+    private static async Task<(bool Ok, string Message, string? Endpoint, string Protocol)> FinishConnectedAsync(
+        string message,
+        string? endpoint,
+        string protocol,
+        CensorshipOptions opt,
+        IProgress<string>? progress,
+        CancellationToken ct)
+    {
+        // Critical for gaming: GoodbyeDPI/WinDivert adds latency to all TCP — stop once tunnel is up.
+        if (opt.DpiAssist || WarpDpiAssist.IsActive)
+        {
+            progress?.Report("Stopping DPI assist (WinDivert fragment adds latency to games)…");
+            await WarpDpiAssist.StopAsync().ConfigureAwait(false);
+        }
+
+        string usedProtocol = protocol;
+        string? usedEndpoint = endpoint;
+
+        if (opt.LowLatency)
+        {
+            // Ensure tunnel_only after connect (reconnect-safe).
+            SetModeTunnelOnly();
+            Run("debug", "high-timeouts", "disable");
+
+            if (protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
+            {
+                var upgraded = await TryUpgradeToWireGuardAsync(endpoint, progress, ct).ConfigureAwait(false);
+                if (upgraded.Ok)
+                {
+                    usedProtocol = "WireGuard";
+                    usedEndpoint = upgraded.Endpoint ?? endpoint;
+                    message = $"Connected via {usedEndpoint ?? "default"} (WireGuard, upgraded from MASQUE for lower latency).";
+                }
+                else
+                {
+                    progress?.Report("WireGuard upgrade skipped — staying on MASQUE.");
+                }
+            }
+
+            progress?.Report("Excluding Iran/domestic ranges from tunnel (local traffic stays direct)…");
+            ApplyDomesticSplitTunnelExcludes(progress);
+            message += " Low-latency profile applied.";
+        }
+
+        return (true, message, usedEndpoint, usedProtocol);
+    }
+
+    /// <summary>Try same host on classic WG ports — lower overhead than MASQUE/H2 when UDP works.</summary>
+    private static async Task<(bool Ok, string? Endpoint)> TryUpgradeToWireGuardAsync(
+        string? currentEndpoint,
+        IProgress<string>? progress,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(currentEndpoint) ||
+            !TryParseHostPort(currentEndpoint, out string host, out _))
+        {
+            host = (!string.IsNullOrWhiteSpace(currentEndpoint) && currentEndpoint.IndexOf(':') < 0)
+                ? currentEndpoint.Trim()
+                : "engage.cloudflareclient.com";
+        }
+
+        int[] ports = { 2408, 500, 4500, 1701, 878, 894 };
+        foreach (int port in ports)
+        {
+            ct.ThrowIfCancellationRequested();
+            string ep = $"{host}:{port}";
+            progress?.Report($"Low-latency: trying WireGuard {ep}…");
+            Disconnect();
+            SetProtocol("WireGuard");
+            Result set = SetEndpoint(ep);
+            if (!set.Ok) continue;
+            if (!await PollConnectedAsync(progress, verifyWarpOn: false, ct, longPoll: false).ConfigureAwait(false))
+                continue;
+            PublicIpInfo info = await FetchPublicIpInfoAsync(4000).ConfigureAwait(false);
+            if (info.WarpOn != false)
+                return (true, ep);
+        }
+
+        // Revert to MASQUE on original endpoint
+        progress?.Report("Reverting to MASQUE…");
+        Disconnect();
+        SetProtocol("MASQUE");
+        SetMasqueOptions("h3-with-h2-fallback");
+        if (!string.IsNullOrWhiteSpace(currentEndpoint))
+            SetEndpoint(currentEndpoint);
+        else
+            ResetEndpoint();
+        await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: true).ConfigureAwait(false);
+        return (false, null);
+    }
+
+    /// <summary>
+    /// Keep Iranian / private traffic off WARP so only foreign destinations (games servers) use the tunnel.
+    /// </summary>
+    public static void ApplyDomesticSplitTunnelExcludes(IProgress<string>? progress = null)
+    {
+        // Compact major Iran + private ranges (exclude = leave tunnel). Already-present ranges are fine.
+        string[] ranges =
+        {
+            "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
+            // Large Iran allocations (RIPE / common lists) — domestic stays on ISP path
+            "2.144.0.0/14", "5.52.0.0/16", "5.104.0.0/16", "5.160.0.0/16", "5.201.0.0/16",
+            "5.202.0.0/16", "5.208.0.0/12", "5.232.0.0/14", "31.2.128.0/17", "31.7.64.0/18",
+            "31.14.144.0/20", "31.24.0.0/16", "31.56.0.0/14", "37.9.0.0/16", "37.32.0.0/16",
+            "37.98.0.0/16", "37.148.0.0/16", "37.156.0.0/16", "45.82.0.0/16", "46.32.0.0/16",
+            "46.100.0.0/16", "46.209.0.0/16", "62.60.128.0/17", "62.102.128.0/17", "62.220.96.0/19",
+            "78.38.0.0/15", "79.127.0.0/16", "80.191.0.0/16", "81.12.0.0/16", "81.31.160.0/19",
+            "82.99.192.0/18", "83.147.192.0/18", "84.241.0.0/17", "85.133.128.0/17", "85.185.0.0/16",
+            "86.55.0.0/16", "89.32.0.0/16", "89.165.0.0/16", "89.198.0.0/16", "91.98.0.0/15",
+            "91.133.0.0/16", "92.42.48.0/20", "92.114.16.0/20", "93.110.0.0/16", "94.74.128.0/17",
+            "94.182.0.0/15", "95.38.0.0/16", "95.82.0.0/16", "109.74.224.0/19", "109.110.160.0/19",
+            "109.122.192.0/18", "151.232.0.0/14", "151.238.0.0/15", "158.58.0.0/16", "159.20.64.0/18",
+            "164.138.0.0/16", "176.65.192.0/18", "178.21.40.0/21", "178.22.72.0/21", "178.131.0.0/16",
+            "178.157.0.0/16", "178.173.128.0/17", "178.216.0.0/16", "178.236.32.0/20", "178.251.208.0/20",
+            "185.4.0.0/16", "185.8.172.0/22", "185.10.72.0/22", "185.55.224.0/22", "185.73.76.0/22",
+            "185.80.196.0/22", "185.94.96.0/22", "185.105.236.0/22", "185.112.32.0/22", "185.120.200.0/22",
+            "185.141.48.0/22", "185.160.104.0/22", "185.161.48.0/22", "185.164.72.0/22", "185.167.72.0/22",
+            "185.176.32.0/22", "185.177.156.0/22", "185.178.220.0/22", "185.180.128.0/22", "185.192.112.0/22",
+            "185.204.180.0/22", "185.208.172.0/22", "185.213.164.0/22", "188.34.0.0/16", "188.75.0.0/16",
+            "188.121.96.0/19", "188.136.128.0/17", "188.158.0.0/16", "188.191.176.0/20", "188.209.0.0/16",
+            "188.210.64.0/18", "188.211.0.0/16", "188.212.48.0/20", "188.213.64.0/18", "188.245.0.0/16",
+            "193.176.240.0/20", "194.33.104.0/22", "194.36.0.0/16", "194.225.0.0/16", "195.146.32.0/19",
+            "212.16.64.0/19", "212.33.192.0/19", "212.80.0.0/16", "213.176.64.0/18", "213.207.192.0/18",
+            "217.11.16.0/20", "217.66.192.0/18", "217.172.96.0/19", "217.218.0.0/15",
+        };
+
+        int ok = 0;
+        foreach (string range in ranges)
+        {
+            Result r = Run("tunnel", "ip", "add-range", range);
+            if (r.Ok || r.Combined.Contains("already", StringComparison.OrdinalIgnoreCase))
+                ok++;
+        }
+        progress?.Report($"Split-tunnel excludes applied ({ok}/{ranges.Length} ranges).");
     }
 
     public static async Task<List<string>> FilterReachableEndpointsAsync(
