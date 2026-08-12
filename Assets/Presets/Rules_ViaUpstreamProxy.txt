@@ -1,0 +1,19 @@
+// DNSveil GeoHide — route selected hosts via UPSTREAM PROXY
+//
+// REQUIREMENT: Set GeoHideProxy to a SOCKS5/HTTP proxy whose EXIT is outside
+// your restricted network. Example:
+//   GeoHideProxy = socks5://127.0.0.1:1080;
+//
+// Then start DNSveil DNS + Share Proxy, and send app traffic through the local
+// SOCKS (e.g. Proxifier) when the app does not honor system HTTP proxy.
+//
+// For changing the public IP of all traffic without a VPS, prefer
+// Tools → GeoHide WARP (Cloudflare WARP / warp-cli).
+
+GeoHideProxy = socks5://127.0.0.1:1080;
+
+// Examples — replace with the domains you need to egress via the proxy
+example-blocked.com|--;proxy:GeoHideProxy;
+*.example-blocked.com|--;proxy:GeoHideProxy;
+
+*|+;

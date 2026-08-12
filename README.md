@@ -16,14 +16,14 @@ Server implementation: _DoH and Plain DNS (UDP & TCP)._
 - *Encode and decode DNSCrypt STAMP (sdns://).*
 - *Share to other devices via Proxy (HTTP, HTTPS, SOCKS4, SOCKS4A, SOCKS5).*
 
-**Requirements:** `.Net Destop Runtime 6` and `ASP.NET Core Runtime 6`
+**Requirements:** `.NET Desktop Runtime 6` and `ASP.NET Core Runtime 6`
 
 For x64:\
-First install [.Net Destop Runtime x64 v6.0.36](https://dotnet.microsoft.com/en-us/download/dotnet/thank-you/runtime-desktop-6.0.36-windows-x64-installer)\
+First install [.NET Desktop Runtime x64 v6.0.36](https://dotnet.microsoft.com/en-us/download/dotnet/thank-you/runtime-desktop-6.0.36-windows-x64-installer)\
 Then install [ASP.NET Core Runtime x64 v6.0.36](https://dotnet.microsoft.com/en-us/download/dotnet/thank-you/runtime-aspnetcore-6.0.36-windows-x64-installer)
 
 For x86:\
-First install [.Net Destop Runtime x86 v6.0.36](https://dotnet.microsoft.com/en-us/download/dotnet/thank-you/runtime-desktop-6.0.36-windows-x86-installer)\
+First install [.NET Desktop Runtime x86 v6.0.36](https://dotnet.microsoft.com/en-us/download/dotnet/thank-you/runtime-desktop-6.0.36-windows-x86-installer)\
 Then install [ASP.NET Core Runtime x86 v6.0.36](https://dotnet.microsoft.com/en-us/download/dotnet/thank-you/runtime-aspnetcore-6.0.36-windows-x86-installer)
 
 [Microsoft .NET 6.0 Runtime Page](https://dotnet.microsoft.com/en-us/download/dotnet/6.0)
@@ -34,9 +34,11 @@ Then install [ASP.NET Core Runtime x86 v6.0.36](https://dotnet.microsoft.com/en-
 ---
 
 ### Notes
-* DNSveil is not a VPN and it does not change your IP address, so your IP address is still visible to the websites you visit.
-* DNSveil is open source and super clean. If your Antivirus raise an alert it's False-Positive, any programmer can read the source and confirm it. some antivirus apps raise alert as PUA (Potentially Unwanted Application) for WinDivert which is used by GoodbyeDPI. If your antivirus detects WinDivert as a threat, add it to your exclusion list to ensure DNSveil functions as expected.
-* After changing `Enable SSL Decryption` you need to restart your browser in order the changes to take effect.
+* **Encrypted DNS is not a VPN.** DoH/DoT/DNSCrypt hide DNS queries from your ISP; they do **not** by themselves change the IP address that websites or apps see.
+* Optional **GeoHide WARP** (Tools tab) can drive official Cloudflare WARP (`warp-cli`) so destinations see a Cloudflare exit IP. That requires installing [Cloudflare WARP](https://one.one.one.one/). See `Assets/Presets/README_WARP.md`.
+* Smart DNS providers (e.g. Shecan) only affect domains they proxy; they are not a full IP hide.
+* DNSveil is open source. If your Antivirus raises an alert it's often a False-Positive — WinDivert (used by GoodbyeDPI) is commonly flagged as PUA. Add it to exclusions if needed.
+* After changing `Enable SSL Decryption` you need to restart your browser for the change to take effect.
 
 ---
 
@@ -45,7 +47,8 @@ Then install [ASP.NET Core Runtime x86 v6.0.36](https://dotnet.microsoft.com/en-
 * Find fastest DNS Servers.
 * Bypass any SNI/DNS based blocked websites by Fragment and Fake SNI.
 * Create local Plain DNS and DoH Servers.
-* Supports per domain rules.
+* Supports per domain rules (including Smart DNS and upstream proxy rules).
+* **GeoHide WARP:** connect/disconnect Cloudflare WARP from Tools, with custom endpoints when defaults are blocked (inspired by [PyWarp](https://github.com/saeedmasoudie/pywarp)).
 * Advanced DNS Scanner.
     - Detection of Google safe search.
     - Detection of Bing safe search.
@@ -89,10 +92,10 @@ Then install [ASP.NET Core Runtime x86 v6.0.36](https://dotnet.microsoft.com/en-
 ---
 
 ### Proxy Server
-* Proxy server is use to bypass SNI/DNS based blocked websites.
+* Proxy server is used to bypass SNI/DNS based blocked websites.
 * How to use:
     1. DNSveil DNS Server must be online and set to System.
-    2. Atleast one of DPI Bypass options must be active.
+    2. At least one of DPI Bypass options must be active.
         - Fragment
         - SSL Decryption (by installing self-signed root certificate authority)
             - Enable `Change SNI` and provide a fake SNI.
@@ -126,7 +129,7 @@ Then install [ASP.NET Core Runtime x86 v6.0.36](https://dotnet.microsoft.com/en-
     - Direct: Don't apply DPI bypass and upstream proxy for a domain:\
     `example.com|--;`\
     `*.example.com|--;`
-    - Block a domain and all it's sub-domains:\
+    - Block a domain and all its sub-domains:\
     `example.com|-;`\
     `*.example.com|-;`
     - Block CIDR (IP Range):\
@@ -186,6 +189,14 @@ save.tube|--;
 // Apply Defaults To Other Domains
 *|+;
 ```
+
+---
+
+### GeoHide (optional)
+* **Goal:** make destinations see a non-ISP exit IP when DNS alone is not enough.
+* **Tools → GeoHide WARP:** requires [Cloudflare WARP](https://one.one.one.one/); uses `warp-cli` (connect, custom endpoints, WireGuard/MASQUE).
+* **Rules presets** under `Assets/Presets/`: Shecan anti-sanction, gaming Smart DNS template, upstream-proxy template. Import from Settings → Edit Rules.
+* More detail: [`Assets/Presets/README_GeoHide.md`](Assets/Presets/README_GeoHide.md), [`Assets/Presets/README_WARP.md`](Assets/Presets/README_WARP.md).
 
 ---
 

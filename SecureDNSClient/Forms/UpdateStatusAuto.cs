@@ -185,7 +185,9 @@ public partial class FormMain
                 return;
             }
 
-            string updateUrl = "https://github.com/msasanmh/SecureDNSClient/raw/main/update";
+            // Prefer DNSveil; keep SecureDNSClient URL as fallback for older mirrors
+            string updateUrl = "https://raw.githubusercontent.com/msasanmh/DNSveil/main/update";
+            string updateUrlFallback = "https://raw.githubusercontent.com/msasanmh/SecureDNSClient/main/update";
             string update = string.Empty;
             string labelUpdate = string.Empty;
             string downloadUrl = string.Empty;
@@ -198,12 +200,12 @@ public partial class FormMain
 
             try
             {
-                // Without System Proxy
+                // Without System Proxy — require valid TLS (do not AllowInsecure)
                 Uri uri = new(updateUrl, UriKind.Absolute);
                 HttpRequest hr = new()
                 {
                     AllowAutoRedirect = true,
-                    AllowInsecure = true,
+                    AllowInsecure = false,
                     TimeoutMS = 20000,
                     URI = uri
                 };
@@ -214,20 +216,30 @@ public partial class FormMain
                 }
                 else
                 {
-                    // With System Proxy
-                    string systemProxyScheme = NetworkTool.GetSystemProxy();
-                    if (!string.IsNullOrWhiteSpace(systemProxyScheme))
+                    // Fallback URL
+                    hr.URI = new Uri(updateUrlFallback, UriKind.Absolute);
+                    hrr = await HttpRequest.SendAsync(hr);
+                    if (hrr.IsSuccess)
+                        update = Encoding.UTF8.GetString(hrr.Data);
+                    else
                     {
-                        hr.ProxyScheme = systemProxyScheme;
-                        hrr = await HttpRequest.SendAsync(hr);
-                        if (hrr.IsSuccess)
+                        // With System Proxy
+                        string systemProxyScheme = NetworkTool.GetSystemProxy();
+                        if (!string.IsNullOrWhiteSpace(systemProxyScheme))
                         {
-                            update = Encoding.UTF8.GetString(hrr.Data);
+                            hr.URI = new Uri(updateUrl, UriKind.Absolute);
+                            hr.ProxyScheme = systemProxyScheme;
+                            hrr = await HttpRequest.SendAsync(hr);
+                            if (hrr.IsSuccess)
+                                update = Encoding.UTF8.GetString(hrr.Data);
                         }
                     }
                 }
             }
-            catch (Exception) { }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("CheckUpdateAsync fetch: " + ex.Message);
+            }
 
             update = update.Trim();
             Debug.WriteLine(update);

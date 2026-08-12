@@ -1,0 +1,33 @@
+// DNSveil GeoHide — Gaming Smart DNS (NO VPS)
+//
+// Shecan/403 are mainly for developer/web sanctions.
+// For many online games, use gaming Smart DNS providers (e.g. Shelter, Radar).
+// They rewrite DNS for *covered* titles so traffic may hit their proxies and
+// remote services can see a non-local exit — ONLY if the game is on their list.
+//
+// Shelter (example): 94.103.125.157 / 94.103.125.158
+// Radar Game:        10.202.10.10 / 10.202.10.11
+//
+// 1) Confirm your game is listed by the provider.
+// 2) Add its domains below (or import and edit).
+// 3) Enable Rules, Connect DNSveil, set DNS to System.
+// 4) If the title is not covered: Tools → GeoHide WARP instead.
+//
+// Tip: Compare nslookup of a game host via 8.8.8.8 vs Shelter.
+// Different A records ⇒ Smart DNS rewrite is active for that name.
+
+ShelterDns = udp://94.103.125.157:53,udp://94.103.125.158:53;
+RadarDns = udp://10.202.10.10:53,udp://10.202.10.11:53;
+GamingDns = ShelterDns,RadarDns;
+
+// Add game / platform domains here, for example:
+// steamcommunity.com|--;dns:GamingDns;
+// *.steampowered.com|--;dns:GamingDns;
+
+// Keep anti-sanction web on Shecan (optional)
+ShecanDns = https://free.shecan.ir/dns-query;
+github.com|--;dns:ShecanDns;
+*.github.com|--;dns:ShecanDns;
+*.githubusercontent.com|--;dns:ShecanDns;
+
+*|+;

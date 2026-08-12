@@ -87,9 +87,9 @@ public class SecureDNS
     public static readonly string SettingsXmlDnsScanner = GetFullPath(UserDataDirPath, "DnsScannerSettings.xml");
     public static readonly string SettingsXmlDnsScannerExport = GetFullPath(UserDataDirPath, "DnsScannerExportSettings.xml");
     public static readonly string UserIdPath = GetFullPath(UserDataDirPath, "uid.txt");
-    public static readonly string BuiltInServersSecureUpdateUrl = "https://github.com/msasanmh/SecureDNSClient/raw/main/Subs/sdc-secure.txt";
+    public static readonly string BuiltInServersSecureUpdateUrl = "https://raw.githubusercontent.com/msasanmh/DNSveil/main/Subs/sdc-secure.txt";
     public static readonly string BuiltInServersSecurePath = GetFullPath(UserDataDirPath, "BuiltInServers_Secure.txt");
-    public static readonly string BuiltInServersInsecureUpdateUrl = "https://github.com/msasanmh/SecureDNSClient/raw/main/Subs/sdc-insecure.txt";
+    public static readonly string BuiltInServersInsecureUpdateUrl = "https://raw.githubusercontent.com/msasanmh/DNSveil/main/Subs/sdc-insecure.txt";
     public static readonly string BuiltInServersInsecurePath = GetFullPath(UserDataDirPath, "BuiltInServers_Insecure.txt");
     public static readonly string BuiltInServersSubscriptionPath = GetFullPath(UserDataDirPath, "BuiltInServers_Subscription.txt");
     public static readonly string BuiltInServersMaliciousPath = GetFullPath(UserDataDirPath, "BuiltInServers_Malicious.txt");

@@ -1,0 +1,46 @@
+// DNSveil GeoHide — Anti-sanction via Shecan + Shelter (web/dev only)
+// Does NOT hide IP from game servers. Enable Rules in Settings after import.
+//
+// Shecan DoH: https://free.shecan.ir/dns-query  (also dns.shecan.ir)
+// Shelter: adjust ShelterDns if your provider URL differs.
+
+ShecanDns = https://free.shecan.ir/dns-query;
+ShelterDns = https://dns.shecan.ir/dns-query;
+
+// Common sanctioned / restricted developer & SaaS domains
+github.com|--;dns:ShecanDns,ShelterDns;
+*.github.com|--;dns:ShecanDns,ShelterDns;
+*.githubusercontent.com|--;dns:ShecanDns,ShelterDns;
+gitlab.com|--;dns:ShecanDns,ShelterDns;
+*.gitlab.com|--;dns:ShecanDns,ShelterDns;
+npmjs.com|--;dns:ShecanDns,ShelterDns;
+*.npmjs.com|--;dns:ShecanDns,ShelterDns;
+npmjs.org|--;dns:ShecanDns,ShelterDns;
+*.npmjs.org|--;dns:ShecanDns,ShelterDns;
+registry.npmjs.org|--;dns:ShecanDns,ShelterDns;
+docker.com|--;dns:ShecanDns,ShelterDns;
+*.docker.com|--;dns:ShecanDns,ShelterDns;
+docker.io|--;dns:ShecanDns,ShelterDns;
+*.docker.io|--;dns:ShecanDns,ShelterDns;
+googleapis.com|--;dns:ShecanDns,ShelterDns;
+*.googleapis.com|--;dns:ShecanDns,ShelterDns;
+google.com|--;dns:ShecanDns,ShelterDns;
+*.google.com|--;dns:ShecanDns,ShelterDns;
+developers.google.com|--;dns:ShecanDns,ShelterDns;
+gstatic.com|--;dns:ShecanDns,ShelterDns;
+*.gstatic.com|--;dns:ShecanDns,ShelterDns;
+openai.com|--;dns:ShecanDns,ShelterDns;
+*.openai.com|--;dns:ShecanDns,ShelterDns;
+chatgpt.com|--;dns:ShecanDns,ShelterDns;
+*.chatgpt.com|--;dns:ShecanDns,ShelterDns;
+anthropic.com|--;dns:ShecanDns,ShelterDns;
+*.anthropic.com|--;dns:ShecanDns,ShelterDns;
+claude.ai|--;dns:ShecanDns,ShelterDns;
+*.claude.ai|--;dns:ShecanDns,ShelterDns;
+spotify.com|--;dns:ShecanDns,ShelterDns;
+*.spotify.com|--;dns:ShecanDns,ShelterDns;
+cloudflare.com|--;dns:ShecanDns,ShelterDns;
+*.cloudflare.com|--;dns:ShecanDns,ShelterDns;
+
+// Default: no extra action (ISP/DPI path unchanged)
+*|+;

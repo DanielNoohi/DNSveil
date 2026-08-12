@@ -124,4 +124,11 @@
     </None>
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="..\Assets\Presets\**\*">
+      <Link>Assets\Presets\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>

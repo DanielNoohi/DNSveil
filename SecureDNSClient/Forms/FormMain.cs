@@ -26,6 +26,40 @@ public partial class FormMain : Form
         // Start App Up Time Timer
         AppUpTime.Start();
 
+        // Copy GeoHide presets into UserData when missing
+        try { GeoHidePresets.EnsureUserPresetsCopied(); } catch (Exception) { }
+
+        // Tools → GeoHide WARP (pywarp-style warp-cli control)
+        try
+        {
+            var btnGeoHide = new CustomControls.CustomButton
+            {
+                Name = "CustomButtonToolsGeoHideWarp",
+                Text = "GeoHide WARP",
+                BorderColor = Color.Blue,
+                FlatStyle = FlatStyle.Flat,
+                RoundedCorners = 5,
+                SelectionColor = Color.LightBlue,
+                Size = new Size(115, 27),
+                Location = new Point(200, 150),
+                UseVisualStyleBackColor = true
+            };
+            btnGeoHide.Click += (_, _) =>
+            {
+                if (IsExiting) return;
+                Form? open = Application.OpenForms[nameof(FormGeoHideWarp)];
+                if (open != null) { open.BringToFront(); return; }
+                using FormGeoHideWarp f = new() { StartPosition = FormStartPosition.CenterParent };
+                f.ShowDialog(this);
+            };
+            TabPageTools.Controls.Add(btnGeoHide);
+            btnGeoHide.BringToFront();
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("GeoHide WARP button: " + ex.Message);
+        }
+
         // Write Debug Info About DNS Server To Log
         DnsConsole.StandardDataReceived += DnsConsole_StandardDataReceived;
 

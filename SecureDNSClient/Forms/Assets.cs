@@ -96,7 +96,7 @@ public partial class FormMain
                 // Mirror: IR_Domains
                 if (ir_Domains && !ir_Domains_Done)
                 {
-                    string mirror = "https://raw.githubusercontent.com/msasanmh/SecureDNSClient/refs/heads/main/Assets/IR_Domains.txt";
+                    string mirror = "https://raw.githubusercontent.com/msasanmh/DNSveil/refs/heads/main/Assets/IR_Domains.txt";
                     byte[] bytes = await WebAPI.DownloadFileAsync(mirror, timeoutMs, CancellationToken.None).ConfigureAwait(false);
                     if (bytes.Length > 0)
                     {
@@ -108,7 +108,7 @@ public partial class FormMain
                 // Mirror: IR_CIDRs
                 if (ir_CIDRs && !ir_CIDRs_Done)
                 {
-                    string mirror = "https://raw.githubusercontent.com/msasanmh/SecureDNSClient/refs/heads/main/Assets/IR_CIDRs.txt";
+                    string mirror = "https://raw.githubusercontent.com/msasanmh/DNSveil/refs/heads/main/Assets/IR_CIDRs.txt";
                     byte[] bytes = await WebAPI.DownloadFileAsync(mirror, timeoutMs, CancellationToken.None).ConfigureAwait(false);
                     if (bytes.Length > 0)
                     {
@@ -120,7 +120,7 @@ public partial class FormMain
                 // Mirror: IR_ADS
                 if (ir_ADS &&  !ir_ADS_Done)
                 {
-                    string mirror = "https://raw.githubusercontent.com/msasanmh/SecureDNSClient/refs/heads/main/Assets/IR_ADS_Domains.txt";
+                    string mirror = "https://raw.githubusercontent.com/msasanmh/DNSveil/refs/heads/main/Assets/IR_ADS_Domains.txt";
                     byte[] bytes = await WebAPI.DownloadFileAsync(mirror, timeoutMs, CancellationToken.None).ConfigureAwait(false);
                     if (bytes.Length > 0)
                     {
