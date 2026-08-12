@@ -163,9 +163,12 @@ public static class GeoHidePresets
     public static string HelpSummary =>
         "DNS alone does not hide your IP from websites or apps.\n\n" +
         "• Tools → GeoHide WARP: controls official warp-cli (like PyWarp).\n" +
+        "• Iran / heavy DPI: enable Censorship mode + DPI assist, protocol MASQUE, then Auto-find.\n" +
+        "  – DPI assist = GoodbyeDPI TLS ClientHello fragment (GFW-knocker style).\n" +
+        "  – Scans IRCF endpoints + Cloudflare WARP CIDRs over TCP (not ICMP).\n" +
+        "  – MASQUE with HTTP/2 fallback when QUIC is blocked.\n" +
         "• Connect WARP so remotes see a Cloudflare exit IP.\n" +
-        "• Auto-find endpoint helps when ISPs block default WARP.\n" +
-        "• Import Shecan / gaming / upstream-proxy presets from the GeoHide window.\n" +
-        "• After import, rules are re-applied to a running DNS/Share session when possible.\n\n" +
+        "• Import Shecan / gaming / upstream-proxy presets from the GeoHide window.\n\n" +
+        "Hard limit: warp-cli cannot fake MASQUE SNI. If CF engage IPs are fully blocked, you need another tunnel.\n\n" +
         "See Assets/Presets/README_WARP.md and README_GeoHide.md";
 }

@@ -1,39 +1,67 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 
 namespace SecureDNSClient.GeoHide;
 
 /// <summary>
 /// Thin wrapper around Cloudflare's official <c>warp-cli</c>, inspired by
 /// https://github.com/saeedmasoudie/pywarp (endpoint set, protocol, connect).
+/// Censorship mode draws on IRCF endpoints, patterniha CF scanning (TCP not ICMP),
+/// and GFW-knocker-style TLS fragmentation via <see cref="WarpDpiAssist"/>.
 /// </summary>
 public static class WarpCli
 {
     public static readonly string[] EngageHosts =
     {
         "engage.cloudflareclient.com",
-        "162.159.192.1",
-        "162.159.193.1",
-        "162.159.195.1",
-        "162.159.198.1",
-        "162.159.199.1",
-        "162.159.204.1",
-        "188.114.96.1",
-        "188.114.97.1",
-        "188.114.98.1",
-        "188.114.99.1",
-        "188.114.100.1",
-        "188.114.101.1",
+        "162.159.192.1", "162.159.192.2", "162.159.193.1", "162.159.193.3",
+        "162.159.195.1", "162.159.195.3", "162.159.198.0", "162.159.198.1",
+        "162.159.198.2", "162.159.199.1", "162.159.199.2", "162.159.204.1",
+        "188.114.96.1", "188.114.97.1", "188.114.98.1", "188.114.99.1",
+        "188.114.100.1", "188.114.101.1",
     };
 
-    public static readonly int[] WireGuardPorts = { 2408, 500, 1701, 4500 };
-    public static readonly int[] MasquePorts = { 443, 8443 };
+    /// <summary>Classic WG + IRCF / community alternate ports used under censorship.</summary>
+    public static readonly int[] WireGuardPorts =
+    {
+        2408, 500, 1701, 4500, 443, 854, 878, 864, 890, 894, 903, 908,
+        1002, 1070, 1387, 2371, 2506, 3138, 3476, 3581, 3854, 4177, 4198,
+        4233, 4443, 5279, 5956, 7103, 7152, 7281, 7559, 8095, 8319, 8742,
+        8854, 8886,
+    };
+
+    public static readonly int[] MasquePorts = { 443, 8443, 4443, 8095 };
+
+    /// <summary>WARP/MASQUE-relevant CF ranges (IRCF + Cloudflare engage anycast).</summary>
+    public static readonly string[] WarpScanCidrs =
+    {
+        "162.159.192.0/24",
+        "162.159.193.0/24",
+        "162.159.195.0/24",
+        "162.159.198.0/24",
+        "162.159.199.0/24",
+        "188.114.96.0/24",
+        "188.114.97.0/24",
+        "188.114.98.0/24",
+        "188.114.99.0/24",
+    };
+
+    private static readonly string[] IrcfEndpointUrls =
+    {
+        "https://raw.githubusercontent.com/ircfspace/endpoint/main/v2.json",
+        "https://ircfspace.github.io/endpoint/v2.json",
+    };
 
     private static string? _cachedExe;
     private static DateTime _cachedExeAt = DateTime.MinValue;
     private static readonly HttpClient SharedHttp = CreateHttpClient();
+    private static List<string>? _cachedIrcf;
+    private static DateTime _cachedIrcfAt = DateTime.MinValue;
 
     private static HttpClient CreateHttpClient()
     {
@@ -53,6 +81,18 @@ public static class WarpCli
             string.IsNullOrWhiteSpace(StdErr)
                 ? StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim() ?? ""
                 : StdErr.Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim() ?? "";
+    }
+
+    public sealed class CensorshipOptions
+    {
+        /// <summary>Scan CF CIDRs + IRCF lists; MASQUE-first; longer polls.</summary>
+        public bool Enabled { get; init; } = true;
+        /// <summary>Start GoodbyeDPI TLS fragment before connect (GFW-knocker style).</summary>
+        public bool DpiAssist { get; init; } = true;
+        public int MaxCandidates { get; init; } = 96;
+        public int MaxConnectAttempts { get; init; } = 18;
+        public int ProbeTimeoutMs { get; init; } = 500;
+        public int CidrSamplePerRange { get; init; } = 48;
     }
 
     public static string? FindExecutable(bool forceRefresh = false)
@@ -99,7 +139,6 @@ public static class WarpCli
 
     public static bool IsInstalled() => !string.IsNullOrEmpty(FindExecutable());
 
-    /// <summary>True when Cloudflare WARP service process appears to be running.</summary>
     public static bool IsServiceRunning()
     {
         try
@@ -109,7 +148,7 @@ public static class WarpCli
         }
         catch
         {
-            return true; // don't block connect if we cannot inspect processes
+            return true;
         }
     }
 
@@ -135,7 +174,6 @@ public static class WarpCli
             };
             p.Start();
 
-            // Read stdout/stderr in parallel to avoid classic pipe-buffer deadlock.
             Task<string> outTask = p.StandardOutput.ReadToEndAsync();
             Task<string> errTask = p.StandardError.ReadToEndAsync();
             if (!Task.WaitAll(new Task[] { outTask, errTask }, 45_000))
@@ -173,10 +211,8 @@ public static class WarpCli
     public static Result SetEndpoint(string endpoint) => Run("tunnel", "endpoint", "set", endpoint);
     public static Result ResetEndpoint() => Run("tunnel", "endpoint", "reset");
 
-    /// <summary>True when a consumer WARP registration already exists.</summary>
     public static bool HasRegistration()
     {
-        // Prefer plain show; -j is not available on all builds.
         Result show = Run("registration", "show");
         if (IsRegistrationPresent(show)) return true;
         Result showJson = Run("-j", "registration", "show");
@@ -198,7 +234,6 @@ public static class WarpCli
     {
         string t = r.Combined;
         if (string.IsNullOrWhiteSpace(t)) return false;
-        // Missing registration typically errors; success prints account/device fields.
         if (t.Contains("not registered", StringComparison.OrdinalIgnoreCase) ||
             t.Contains("No registration", StringComparison.OrdinalIgnoreCase) ||
             t.Contains("Missing registration", StringComparison.OrdinalIgnoreCase))
@@ -207,7 +242,6 @@ public static class WarpCli
             t.Contains("Device ID", StringComparison.OrdinalIgnoreCase) ||
             t.Contains("License", StringComparison.OrdinalIgnoreCase))
             return true;
-        // Some builds print JSON with id / account_type
         if (t.Contains("account_type", StringComparison.OrdinalIgnoreCase) ||
             t.Contains("\"device_id\"", StringComparison.OrdinalIgnoreCase))
             return true;
@@ -237,7 +271,6 @@ public static class WarpCli
 
     public static bool IsConnected(Result status)
     {
-        // Strict parsing: "Not Connected" must never count as Connected.
         foreach (string line in status.Combined.Split('\n'))
         {
             string s = line.Trim();
@@ -247,19 +280,15 @@ public static class WarpCli
             string value = colon >= 0 ? s[(colon + 1)..].Trim() : s;
             if (value.Equals("Connected", StringComparison.OrdinalIgnoreCase))
                 return true;
-            // Any other Status line (Connecting / Disconnected / Not connected / …) is not success.
             return false;
         }
         return false;
     }
 
-    /// <summary>
-    /// Endpoint candidates matched to protocol (WG ports vs MASQUE ports).
-    /// </summary>
     public static IEnumerable<string> EnumerateEndpointCandidates(string protocol = "WireGuard", int maxCount = 24)
     {
         bool masque = protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase);
-        int[] ports = masque ? MasquePorts : WireGuardPorts;
+        int[] ports = masque ? MasquePorts : WireGuardPorts.Take(8).ToArray();
 
         var hosts = new List<string> { EngageHosts[0] };
         var ips = EngageHosts.Skip(1).ToList();
@@ -277,54 +306,224 @@ public static class WarpCli
         }
     }
 
+    /// <summary>
+    /// Build a large Iran/censorship-oriented candidate list:
+    /// IRCF live endpoints + known engage hosts + random samples from WARP CF CIDRs.
+    /// Prefer MASQUE :443 (looks like HTTPS; H2 TCP fallback works with TLS fragment).
+    /// </summary>
+    public static async Task<List<string>> BuildCensorshipCandidatesAsync(
+        string preferredProtocol,
+        CensorshipOptions opt,
+        IProgress<string>? progress,
+        CancellationToken ct)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        bool preferMasque = preferredProtocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase)
+                            || opt.Enabled;
+
+        // 1) Live IRCF community list (Iran-curated)
+        progress?.Report("Fetching IRCF community endpoints…");
+        foreach (string ep in await FetchIrcfEndpointsAsync(ct).ConfigureAwait(false))
+            set.Add(ep);
+
+        // 2) Hardcoded engage + IRCF-like seeds
+        foreach (string host in EngageHosts.Skip(1))
+        {
+            set.Add($"{host}:443");
+            set.Add($"{host}:8443");
+            set.Add($"{host}:2408");
+            set.Add($"{host}:500");
+            set.Add($"{host}:4500");
+            set.Add($"{host}:1701");
+        }
+
+        // 3) Random samples from WARP CF CIDRs × MASQUE ports (patterniha: TCP scan, not ICMP)
+        progress?.Report("Sampling Cloudflare WARP CIDRs (TCP probe targets)…");
+        int[] ports = preferMasque
+            ? MasquePorts
+            : new[] { 2408, 500, 4500, 1701, 878, 894, 903, 1002, 4177, 7281, 8886 };
+        foreach (string cidr in WarpScanCidrs)
+        {
+            foreach (IPAddress ip in SampleCidr(cidr, opt.CidrSamplePerRange))
+            {
+                foreach (int port in ports.Take(preferMasque ? 2 : 4))
+                    set.Add($"{ip}:{port}");
+            }
+        }
+
+        List<string> list = set.ToList();
+        Shuffle(list);
+
+        // Put MASQUE :443 first when censorship mode is on
+        if (preferMasque)
+        {
+            list = list
+                .OrderBy(e => e.EndsWith(":443") ? 0 : e.EndsWith(":8443") ? 1 : 2)
+                .ThenBy(_ => Random.Shared.Next())
+                .ToList();
+        }
+
+        if (list.Count > opt.MaxCandidates)
+            list = list.Take(opt.MaxCandidates).ToList();
+
+        progress?.Report($"Built {list.Count} censorship-resistant candidates.");
+        return list;
+    }
+
+    public static async Task<List<string>> FetchIrcfEndpointsAsync(CancellationToken ct)
+    {
+        if (_cachedIrcf != null && (DateTime.UtcNow - _cachedIrcfAt).TotalMinutes < 30)
+            return _cachedIrcf;
+
+        var found = new List<string>();
+        foreach (string url in IrcfEndpointUrls)
+        {
+            try
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(8000);
+                string json = await SharedHttp.GetStringAsync(url, cts.Token).ConfigureAwait(false);
+                using JsonDocument doc = JsonDocument.Parse(json);
+                JsonElement root = doc.RootElement;
+
+                void AddArr(JsonElement arr)
+                {
+                    if (arr.ValueKind != JsonValueKind.Array) return;
+                    foreach (JsonElement el in arr.EnumerateArray())
+                    {
+                        string? s = el.GetString();
+                        if (!string.IsNullOrWhiteSpace(s) && s.Contains(':') && !s.Contains('['))
+                            found.Add(s.Trim());
+                    }
+                }
+
+                if (root.TryGetProperty("masque", out JsonElement masque))
+                {
+                    if (masque.TryGetProperty("ipv4", out JsonElement m4)) AddArr(m4);
+                }
+                if (root.TryGetProperty("warp", out JsonElement warp))
+                {
+                    if (warp.TryGetProperty("ipv4", out JsonElement w4)) AddArr(w4);
+                }
+                // legacy ip.json shape
+                if (root.TryGetProperty("ipv4", out JsonElement legacy)) AddArr(legacy);
+
+                if (found.Count > 0) break;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("FetchIrcfEndpointsAsync: " + ex.Message);
+            }
+        }
+
+        // Static IRCF v2 fallback seeds if network fetch failed
+        if (found.Count == 0)
+        {
+            found.AddRange(new[]
+            {
+                "162.159.198.0:443", "162.159.198.1:443", "162.159.198.2:443",
+                "162.159.192.1:2408", "162.159.192.1:500", "162.159.192.1:4500",
+                "162.159.192.2:878", "162.159.192.64:894", "162.159.192.8:903",
+                "162.159.195.1:4177", "162.159.195.3:878", "188.114.96.24:1002",
+                "188.114.97.6:7281", "8.6.112.224:8886",
+            });
+        }
+
+        _cachedIrcf = found.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        _cachedIrcfAt = DateTime.UtcNow;
+        return _cachedIrcf;
+    }
+
     public static async Task<(bool Ok, string Message, string? Endpoint, string Protocol)> TryConnectWithFallbackAsync(
         IEnumerable<string>? endpoints,
         string preferredProtocol = "WireGuard",
         IProgress<string>? progress = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        CensorshipOptions? censorship = null)
     {
+        censorship ??= new CensorshipOptions { Enabled = false, DpiAssist = false };
+
         if (!IsInstalled())
             return (false, "Cloudflare WARP (warp-cli) is not installed.", null, preferredProtocol);
 
         if (!IsServiceRunning())
             return (false, "Cloudflare WARP service is not running. Open the official WARP app once, then retry.", null, preferredProtocol);
 
+        // DPI assist first — fragment TLS ClientHello so engage/MASQUE H2 is not RST'd on SNI.
+        if (censorship.DpiAssist)
+        {
+            var (dpiOk, dpiMsg) = await WarpDpiAssist.StartAsync(progress: progress).ConfigureAwait(false);
+            progress?.Report(dpiMsg);
+            if (!dpiOk)
+                progress?.Report("Continuing without DPI assist…");
+        }
+
         AcceptTos();
         Disconnect();
 
         if (!EnsureRegistration(progress))
-            return (false, "WARP registration failed. Open the official WARP app once, accept the ToS, then retry.", null, preferredProtocol);
+            return (false, "WARP registration failed. Open the official WARP app once (or enable DPI assist), accept the ToS, then retry.", null, preferredProtocol);
 
         SetModeWarp();
-        SetProtocol(preferredProtocol);
-        if (preferredProtocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
-            SetMasqueOptions("h3-with-h2-fallback");
 
         List<string> list = endpoints?.Where(e => !string.IsNullOrWhiteSpace(e)).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
                             ?? new List<string>();
 
-        // Empty list ⇒ Cloudflare default endpoint first, then MASQUE fallback.
-        if (list.Count == 0)
+        if (censorship.Enabled && list.Count == 0)
         {
-            progress?.Report($"Connecting with Cloudflare default endpoint ({preferredProtocol})…");
-            ResetEndpoint();
-            if (await PollConnectedAsync(progress, verifyWarpOn: true, ct).ConfigureAwait(false))
-                return (true, $"Connected via default endpoint ({preferredProtocol}).", null, preferredProtocol);
-            progress?.Report("Default endpoint failed: " + ParseStatus(Status()));
+            list = await BuildCensorshipCandidatesAsync(preferredProtocol, censorship, progress, ct).ConfigureAwait(false);
         }
-        else
+
+        // Protocol order under censorship: MASQUE (H2 TCP fallback) first, then WireGuard.
+        string[] protocols = censorship.Enabled
+            ? (preferredProtocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase)
+                ? new[] { "MASQUE", "WireGuard" }
+                : new[] { "MASQUE", preferredProtocol, "WireGuard" }.Distinct(StringComparer.OrdinalIgnoreCase).ToArray())
+            : new[] { preferredProtocol };
+
+        foreach (string protocol in protocols)
         {
-            // Parallel reachability prefilter — skip dead host:ports before slow warp-cli connect loops.
-            progress?.Report($"Probing {list.Count} endpoints in parallel…");
-            List<string> reachable = await FilterReachableEndpointsAsync(list, preferredProtocol, progress, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            SetProtocol(protocol);
+            if (protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
+                SetMasqueOptions("h3-with-h2-fallback");
+
+            List<string> tryList = list;
+            if (censorship.Enabled && list.Count > 0 &&
+                protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
+            {
+                // Prefer HTTPS-looking MASQUE ports first (H2 TCP fallback + TLS fragment).
+                List<string> masquePorts = list
+                    .Where(e => e.EndsWith(":443") || e.EndsWith(":8443") || e.EndsWith(":4443") || e.EndsWith(":8095"))
+                    .ToList();
+                tryList = masquePorts.Count > 0
+                    ? masquePorts.Concat(list.Except(masquePorts, StringComparer.OrdinalIgnoreCase)).ToList()
+                    : list;
+            }
+
+            if (tryList.Count == 0)
+            {
+                progress?.Report($"Connecting with Cloudflare default endpoint ({protocol})…");
+                ResetEndpoint();
+                if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: censorship.Enabled).ConfigureAwait(false))
+                    return (true, $"Connected via default endpoint ({protocol}).", null, protocol);
+                progress?.Report("Default endpoint failed: " + ParseStatus(Status()));
+                continue;
+            }
+
+            progress?.Report($"Probing {tryList.Count} endpoints ({protocol}) in parallel…");
+            List<string> reachable = await FilterReachableEndpointsAsync(
+                tryList, protocol, progress, ct, censorship.ProbeTimeoutMs,
+                take: censorship.Enabled ? censorship.MaxConnectAttempts : 12).ConfigureAwait(false);
+
             if (reachable.Count == 0)
             {
-                progress?.Report("No endpoints responded to probe — trying full list anyway (top 8)…");
-                reachable = list.Take(8).ToList();
+                progress?.Report("Probe found nothing — trying IRCF/seed top entries anyway…");
+                reachable = tryList.Take(censorship.Enabled ? 12 : 8).ToList();
             }
             else
             {
-                progress?.Report($"{reachable.Count}/{list.Count} endpoints look reachable — connecting…");
+                progress?.Report($"{reachable.Count} endpoints look reachable — connecting…");
             }
 
             int n = 0;
@@ -332,7 +531,7 @@ public static class WarpCli
             {
                 ct.ThrowIfCancellationRequested();
                 n++;
-                progress?.Report($"[{n}/{reachable.Count}] Connecting {endpoint} ({preferredProtocol})…");
+                progress?.Report($"[{n}/{reachable.Count}] Connecting {endpoint} ({protocol})…");
                 Disconnect();
                 Result setEp = SetEndpoint(endpoint);
                 if (!setEp.Ok)
@@ -341,12 +540,11 @@ public static class WarpCli
                     continue;
                 }
 
-                // Fast poll during auto-find; verify warp=on only on success path.
-                if (await PollConnectedAsync(progress, verifyWarpOn: false, ct).ConfigureAwait(false))
+                if (await PollConnectedAsync(progress, verifyWarpOn: false, ct, longPoll: censorship.Enabled).ConfigureAwait(false))
                 {
-                    PublicIpInfo info = await FetchPublicIpInfoAsync(4000).ConfigureAwait(false);
-                    if (info.WarpOn != false) // true or unknown
-                        return (true, $"Connected via {endpoint} ({preferredProtocol}).", endpoint, preferredProtocol);
+                    PublicIpInfo info = await FetchPublicIpInfoAsync(5000).ConfigureAwait(false);
+                    if (info.WarpOn != false)
+                        return (true, $"Connected via {endpoint} ({protocol}).", endpoint, protocol);
                     progress?.Report("Status connected but warp=off — trying next…");
                 }
                 else
@@ -356,64 +554,77 @@ public static class WarpCli
             }
         }
 
-        // Last resort: default + MASQUE (helps when WireGuard UDP is blocked).
-        if (!preferredProtocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
+        // Last resort without custom list
+        if (!censorship.Enabled || list.Count > 0)
         {
-            progress?.Report("Trying default endpoint + MASQUE…");
+            progress?.Report("Last resort: default endpoint + MASQUE…");
             Disconnect();
             ResetEndpoint();
             SetProtocol("MASQUE");
             SetMasqueOptions("h3-with-h2-fallback");
-            if (await PollConnectedAsync(progress, verifyWarpOn: true, ct).ConfigureAwait(false))
+            if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: true).ConfigureAwait(false))
                 return (true, "Connected via default endpoint (MASQUE).", null, "MASQUE");
         }
 
-        return (false, "Could not connect. Your ISP may block WARP; try MASQUE, another endpoint, or another network.", null, preferredProtocol);
+        return (false,
+            "Could not connect under censorship. Tips: keep \"DPI assist\" on, try again (new CF IPs), " +
+            "or paste a working IP:443 from Clean IP Scanner / IRCF. " +
+            "If WARP IPs themselves are fully blocked, official warp-cli cannot fake MASQUE SNI — " +
+            "tools like usque/masque-plus with custom SNI may be required as a last resort.",
+            null, preferredProtocol);
     }
 
-    /// <summary>
-    /// Parallel TCP probe of engage IPs. For WireGuard UDP ports we still probe TCP on 443 of the same host
-    /// as a cheap "is this Cloudflare edge reachable?" filter, then keep original endpoint strings ordered by RTT.
-    /// </summary>
     public static async Task<List<string>> FilterReachableEndpointsAsync(
         IList<string> endpoints,
         string protocol,
         IProgress<string>? progress,
-        CancellationToken ct)
+        CancellationToken ct,
+        int timeoutMs = 350,
+        int take = 12)
     {
         bool masque = protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase);
         var scored = new ConcurrentBag<(string Ep, int Ms)>();
 
         await Parallel.ForEachAsync(
             endpoints,
-            new ParallelOptions { MaxDegreeOfParallelism = 64, CancellationToken = ct },
+            new ParallelOptions { MaxDegreeOfParallelism = 96, CancellationToken = ct },
             async (ep, token) =>
             {
                 if (!TryParseHostPort(ep, out string host, out int port)) return;
 
-                int probePort = masque ? port : 443; // WG is UDP; use TCP/443 on same host as reachability signal
-                int ms = await MeasureTcpMsAsync(host, probePort, 350, token).ConfigureAwait(false);
+                int ms;
+                if (masque)
+                {
+                    // Real TCP connect on the MASQUE port (patterniha: do not rely on ICMP).
+                    ms = await MeasureTcpMsAsync(host, port, timeoutMs, token).ConfigureAwait(false);
+                    if (ms < 0 && port == 443)
+                        ms = await MeasureTcpMsAsync(host, 8443, timeoutMs, token).ConfigureAwait(false);
+                }
+                else
+                {
+                    // WG is UDP — try cheap UDP send; also TCP/443 as CF-edge liveness.
+                    ms = await MeasureUdpMsAsync(host, port, timeoutMs, token).ConfigureAwait(false);
+                    if (ms < 0)
+                    {
+                        int tcp = await MeasureTcpMsAsync(host, 443, timeoutMs, token).ConfigureAwait(false);
+                        if (tcp >= 0) ms = tcp + 80; // deprioritize vs real UDP hits
+                    }
+                }
+
                 if (ms >= 0)
                     scored.Add((ep, ms));
-                else if (masque)
-                {
-                    // try alternate MASQUE port quickly
-                    int alt = port == 443 ? 8443 : 443;
-                    ms = await MeasureTcpMsAsync(host, alt, 350, token).ConfigureAwait(false);
-                    if (ms >= 0) scored.Add((ep, ms + 50));
-                }
             }).ConfigureAwait(false);
 
         List<string> ordered = scored
             .OrderBy(x => x.Ms)
             .Select(x => x.Ep)
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Take(12)
+            .Take(Math.Max(4, take))
             .ToList();
 
         progress?.Report(ordered.Count > 0
             ? $"Fastest probe: {ordered[0]} (~{scored.First(s => s.Ep == ordered[0]).Ms}ms)"
-            : "Reachability probe found no open TCP ports.");
+            : "Reachability probe found no open ports.");
         return ordered;
     }
 
@@ -432,8 +643,7 @@ public static class WarpCli
         try
         {
             var sw = Stopwatch.StartNew();
-            using var client = new System.Net.Sockets.TcpClient();
-            client.NoDelay = true;
+            using var client = new TcpClient { NoDelay = true };
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
             linked.CancelAfter(timeoutMs);
             await client.ConnectAsync(host, port, linked.Token).ConfigureAwait(false);
@@ -446,19 +656,43 @@ public static class WarpCli
         }
     }
 
-    private static async Task<bool> PollConnectedAsync(IProgress<string>? progress, bool verifyWarpOn, CancellationToken ct)
+    private static async Task<int> MeasureUdpMsAsync(string host, int port, int timeoutMs, CancellationToken ct)
+    {
+        try
+        {
+            var sw = Stopwatch.StartNew();
+            using var udp = new UdpClient();
+            udp.Client.SendTimeout = timeoutMs;
+            udp.Client.ReceiveTimeout = timeoutMs;
+            // WireGuard handshake-ish bytes — we only care that the path accepts UDP.
+            byte[] payload = new byte[] { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            linked.CancelAfter(timeoutMs);
+            await udp.SendAsync(payload, host, port, linked.Token).ConfigureAwait(false);
+            sw.Stop();
+            // No reliable reply expected; treat successful send as weak positive.
+            return (int)Math.Max(1, sw.ElapsedMilliseconds);
+        }
+        catch
+        {
+            return -1;
+        }
+    }
+
+    private static async Task<bool> PollConnectedAsync(
+        IProgress<string>? progress, bool verifyWarpOn, CancellationToken ct, bool longPoll = false)
     {
         Connect();
-        // Fast window (~3.5s). Auto-find tries many endpoints — keep each attempt short.
-        int loops = verifyWarpOn ? 12 : 8;
+        int loops = longPoll ? (verifyWarpOn ? 20 : 14) : (verifyWarpOn ? 12 : 8);
+        int delay = longPoll ? 500 : 400;
         for (int i = 0; i < loops; i++)
         {
-            await Task.Delay(400, ct).ConfigureAwait(false);
+            await Task.Delay(delay, ct).ConfigureAwait(false);
             Result st = Status();
             string parsed = ParseStatus(st);
             if (parsed.Contains("Failed", StringComparison.OrdinalIgnoreCase))
                 return false;
-            if (i >= 2 && (parsed.Contains("Disconnected", StringComparison.OrdinalIgnoreCase) ||
+            if (i >= 3 && (parsed.Contains("Disconnected", StringComparison.OrdinalIgnoreCase) ||
                            parsed.Contains("Not connected", StringComparison.OrdinalIgnoreCase)))
                 return false;
 
@@ -466,11 +700,11 @@ public static class WarpCli
 
             if (!verifyWarpOn) return true;
 
-            PublicIpInfo info = await FetchPublicIpInfoAsync(3500).ConfigureAwait(false);
+            PublicIpInfo info = await FetchPublicIpInfoAsync(4000).ConfigureAwait(false);
             if (info.WarpOn == true) return true;
             if (info.WarpOn == false)
                 progress?.Report("warp-cli says Connected but trace shows warp=off — waiting…");
-            else if (i >= 5)
+            else if (i >= 6)
                 return true;
         }
         return IsConnected(Status());
@@ -523,6 +757,50 @@ public static class WarpCli
 
     public static async Task<string?> FetchPublicIpAsync(int timeoutMs = 8000)
         => (await FetchPublicIpInfoAsync(timeoutMs).ConfigureAwait(false)).Ip;
+
+    private static IEnumerable<IPAddress> SampleCidr(string cidr, int count)
+    {
+        if (!TryParseCidr(cidr, out uint start, out int prefix))
+            yield break;
+
+        int hostBits = 32 - prefix;
+        long size = hostBits >= 31 ? int.MaxValue : (1L << hostBits);
+        if (size <= 2)
+        {
+            yield return ToIp(start);
+            yield break;
+        }
+
+        // Skip network/broadcast; sample randomly
+        var seen = new HashSet<uint>();
+        int attempts = 0;
+        while (seen.Count < count && attempts++ < count * 8)
+        {
+            uint offset = (uint)(Random.Shared.NextInt64(1, Math.Min(size - 1, int.MaxValue)));
+            uint ip = start + offset;
+            if (seen.Add(ip))
+                yield return ToIp(ip);
+        }
+    }
+
+    private static bool TryParseCidr(string cidr, out uint network, out int prefix)
+    {
+        network = 0;
+        prefix = 0;
+        string[] parts = cidr.Split('/');
+        if (parts.Length != 2) return false;
+        if (!IPAddress.TryParse(parts[0], out IPAddress? ip) || ip.AddressFamily != AddressFamily.InterNetwork)
+            return false;
+        if (!int.TryParse(parts[1], out prefix) || prefix < 0 || prefix > 32) return false;
+        byte[] b = ip.GetAddressBytes();
+        uint addr = ((uint)b[0] << 24) | ((uint)b[1] << 16) | ((uint)b[2] << 8) | b[3];
+        uint mask = prefix == 0 ? 0u : uint.MaxValue << (32 - prefix);
+        network = addr & mask;
+        return true;
+    }
+
+    private static IPAddress ToIp(uint addr) =>
+        new(new byte[] { (byte)(addr >> 24), (byte)(addr >> 16), (byte)(addr >> 8), (byte)addr });
 
     private static void Shuffle<T>(IList<T> list)
     {

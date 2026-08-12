@@ -1,33 +1,43 @@
 # Cloudflare WARP GeoHide (via DNSveil)
 
-## Approach (from PyWarp)
+## Approach (from PyWarp + Iran DPI research)
 
-[PyWarp](https://github.com/saeedmasoudie/pywarp) drives the **official Cloudflare WARP** app through `warp-cli` instead of reinventing WireGuard registration:
+[PyWarp](https://github.com/saeedmasoudie/pywarp) drives the **official Cloudflare WARP** app through `warp-cli`.
 
-- `warp-cli connect` / `disconnect` / `status`
-- `warp-cli tunnel endpoint set IP:port` (when ISPs block defaults)
-- `warp-cli tunnel protocol set WireGuard|MASQUE`
-- `warp-cli mode warp`
-- `warp-cli registration new` + `accept-tos`
+Under Iranian filtering we combine that with techniques from:
 
-DNSveil’s **Tools → GeoHide WARP** window mirrors that flow.
+- [GFW-knocker/gfw_resist_tls_proxy](https://github.com/GFW-knocker/gfw_resist_tls_proxy) — **TLS ClientHello fragmentation** so DPI cannot reassemble blacklisted SNI on Cloudflare edges
+- [patterniha/cf-scanner](https://github.com/patterniha/cf-scanner) — **TCP** reachability (not ICMP ping, which is unreliable in Iran)
+- [IRCF endpoints](https://github.com/ircfspace/endpoint) — community-curated Warp/MASQUE `IP:port` lists
+
+DNSveil’s **Tools → GeoHide WARP** window:
+
+1. Optional **DPI assist** starts GoodbyeDPI (fragment) before `warp-cli connect`
+2. Forces **MASQUE** with `h3-with-h2-fallback` (when QUIC/H3 is blocked, falls to HTTP/2 TCP — where fragment works)
+3. Fetches IRCF endpoints + samples Cloudflare WARP CIDRs (`162.159.192–199`, `188.114.96–99`)
+4. Parallel TCP probes, then connect attempts on the fastest hosts
 
 ## Why this changes what remotes see
 
-Traffic leaves through Cloudflare’s network. Destinations see a **Cloudflare exit IP**, not your ISP address. Encrypted DNS or Shecan-style Smart DNS alone cannot do that for arbitrary apps.
+Traffic leaves through Cloudflare’s network. Destinations see a **Cloudflare exit IP**, not your ISP address.
 
-## Steps
+## Steps (Iran / heavy DPI)
 
-1. Install [Cloudflare WARP](https://one.one.one.one/) (includes `warp-cli`).
-2. Close the official WARP UI if it conflicts (same tip as PyWarp).
-3. Open DNSveil → **Tools → GeoHide WARP**.
-4. Click **Connect**, or **Auto-find endpoint** if connect fails (tries CF anycast IPs + common ports).
-5. Confirm **Public IP** is not your home ISP.
-6. Optional: import Shecan anti-sanction rules for websites.
-7. Use your applications while status stays Connected.
+1. Install [Cloudflare WARP](https://one.one.one.one/) (includes `warp-cli`). Open it once, accept ToS.
+2. Run DNSveil **as Administrator** (needed for GoodbyeDPI / WinDivert).
+3. **Tools → GeoHide WARP**
+4. Leave **Censorship mode** and **DPI assist** checked.
+5. Protocol = **MASQUE**. Click **Auto-find**.
+6. Confirm Public IP shows `warp=on` and a non-Iran location when possible.
+7. Optional: import Shecan anti-sanction rules for websites.
+
+## Hard limits of official `warp-cli`
+
+- Cannot change MASQUE SNI (tools like [usque](https://github.com/Diniboy1123/usque) / masque-plus can).
+- Cannot add QUIC noise obfuscation (vwarp-style).
+- If Cloudflare engage/MASQUE IPs are **fully IP-blocked** on your ISP, you need an alternate tunnel (VLESS/Reality, etc.) — GeoHide cannot invent a path that does not exist.
 
 ## Notes
 
-- Full WARP mode is used (simplest reliable IP change). Consumer “exclude” split-tunnel lists *bypass* WARP — the opposite of hiding your IP.
-- If every endpoint fails, the ISP may be blocking WARP — try MASQUE, another network, or a commercial VPN.
-- Core DNSveil features (DoH, fragment, etc.) still do **not** replace a tunnel for IP hiding; WARP is an optional companion controlled from the Tools tab.
+- Full WARP mode is used (simplest reliable IP change).
+- Core DNSveil features (DoH, Share Fragment) still do **not** replace a tunnel for IP hiding; WARP is the GeoHide companion.

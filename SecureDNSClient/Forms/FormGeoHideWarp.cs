@@ -8,6 +8,8 @@ namespace SecureDNSClient;
 /// <summary>
 /// GeoHide via official Cloudflare WARP (warp-cli), patterned after pywarp:
 /// https://github.com/saeedmasoudie/pywarp
+/// Censorship mode: IRCF endpoints + CF CIDR scan + GoodbyeDPI TLS fragment
+/// (GFW-knocker / patterniha lessons for Iranian DPI).
 /// </summary>
 public class FormGeoHideWarp : Form
 {
@@ -31,6 +33,8 @@ public class FormGeoHideWarp : Form
     private readonly CustomButton _btnHelp = new();
     private readonly TextBox _log = new();
     private readonly CheckBox _chkImportAfterConnect = new();
+    private readonly CheckBox _chkCensorship = new();
+    private readonly CheckBox _chkDpiAssist = new();
     private CancellationTokenSource? _cts;
     private bool _busy;
     private bool _reloadingEndpoints;
@@ -38,7 +42,7 @@ public class FormGeoHideWarp : Form
     public FormGeoHideWarp()
     {
         Text = "GeoHide — Cloudflare WARP";
-        ClientSize = new Size(640, 520);
+        ClientSize = new Size(640, 560);
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -51,48 +55,48 @@ public class FormGeoHideWarp : Form
 
         _lblHelp.AutoSize = false;
         _lblHelp.Location = new Point(12, 10);
-        _lblHelp.Size = new Size(616, 48);
-        _lblHelp.Text = "Uses official Cloudflare WARP (warp-cli). Connect so destinations see a Cloudflare exit IP — not your ISP. Encrypted DNS / Shecan alone cannot change your public IP.";
+        _lblHelp.Size = new Size(616, 40);
+        _lblHelp.Text = "Uses official Cloudflare WARP (warp-cli). Under Iranian DPI: enable Censorship mode + DPI assist (TLS fragment), then Auto-find. Destinations see a Cloudflare exit IP — not your ISP.";
 
         _lblStatus.AutoSize = true;
-        _lblStatus.Location = new Point(12, 66);
+        _lblStatus.Location = new Point(12, 56);
         _lblStatus.Text = "Status: …";
         _lblIp.AutoSize = true;
-        _lblIp.Location = new Point(260, 66);
+        _lblIp.Location = new Point(260, 56);
         _lblIp.Text = "Public IP: …";
 
-        StyleBtn(_btnRefresh, "Refresh", new Point(520, 60), 90);
+        StyleBtn(_btnRefresh, "Refresh", new Point(520, 50), 90);
         _btnRefresh.Click += async (_, _) => await RefreshStatusAsync();
 
         _lblEp.AutoSize = true;
-        _lblEp.Location = new Point(12, 100);
+        _lblEp.Location = new Point(12, 90);
         _lblEp.Text = "Endpoint";
-        _cmbEndpoint.Location = new Point(80, 96);
+        _cmbEndpoint.Location = new Point(80, 86);
         _cmbEndpoint.Size = new Size(280, 28);
         _cmbEndpoint.DropDownStyle = ComboBoxStyle.DropDown;
         StyleCombo(_cmbEndpoint);
 
         _lblProto.AutoSize = true;
-        _lblProto.Location = new Point(380, 100);
+        _lblProto.Location = new Point(380, 90);
         _lblProto.Text = "Protocol";
-        _cmbProtocol.Location = new Point(440, 96);
+        _cmbProtocol.Location = new Point(440, 86);
         _cmbProtocol.Size = new Size(120, 28);
         _cmbProtocol.DropDownStyle = ComboBoxStyle.DropDownList;
         StyleCombo(_cmbProtocol);
-        _cmbProtocol.Items.AddRange(new object[] { "WireGuard", "MASQUE" });
+        _cmbProtocol.Items.AddRange(new object[] { "MASQUE", "WireGuard" });
         _cmbProtocol.SelectedIndexChanged += (_, _) =>
         {
             if (_reloadingEndpoints) return;
             ReloadEndpointList();
         };
-        _cmbProtocol.SelectedIndex = 0;
+        _cmbProtocol.SelectedIndex = 0; // MASQUE first under censorship
 
-        StyleBtn(_btnConnect, "Connect", new Point(12, 136), 100);
-        StyleBtn(_btnDisconnect, "Disconnect", new Point(120, 136), 100);
-        StyleBtn(_btnAuto, "Auto-find", new Point(228, 136), 100);
-        StyleBtn(_btnCancel, "Cancel", new Point(336, 136), 80);
-        StyleBtn(_btnInstall, "Get WARP…", new Point(424, 136), 100);
-        StyleBtn(_btnHelp, "Help", new Point(532, 136), 80);
+        StyleBtn(_btnConnect, "Connect", new Point(12, 126), 100);
+        StyleBtn(_btnDisconnect, "Disconnect", new Point(120, 126), 100);
+        StyleBtn(_btnAuto, "Auto-find", new Point(228, 126), 100);
+        StyleBtn(_btnCancel, "Cancel", new Point(336, 126), 80);
+        StyleBtn(_btnInstall, "Get WARP…", new Point(424, 126), 100);
+        StyleBtn(_btnHelp, "Help", new Point(532, 126), 80);
         _btnCancel.Enabled = false;
         _btnConnect.Click += async (_, _) => await ConnectAsync(auto: false);
         _btnDisconnect.Click += async (_, _) => await DisconnectAsync();
@@ -102,10 +106,32 @@ public class FormGeoHideWarp : Form
         _btnHelp.Click += (_, _) => CustomMessageBox.Show(this, GeoHidePresets.HelpSummary, "GeoHide help",
             MessageBoxButtons.OK, MessageBoxIcon.Information);
 
+        _chkCensorship.AutoSize = true;
+        _chkCensorship.Location = new Point(12, 162);
+        _chkCensorship.Text = "Censorship mode (Iran) — IRCF + CF clean-IP scan, MASQUE/H2 first";
+        _chkCensorship.ForeColor = Color.WhiteSmoke;
+        _chkCensorship.BackColor = Color.Transparent;
+        _chkCensorship.Checked = true;
+        _chkCensorship.CheckedChanged += (_, _) =>
+        {
+            if (_chkCensorship.Checked)
+            {
+                _chkDpiAssist.Checked = true;
+                if (_cmbProtocol.Items.Count > 0) _cmbProtocol.SelectedIndex = 0; // MASQUE
+            }
+        };
+
+        _chkDpiAssist.AutoSize = true;
+        _chkDpiAssist.Location = new Point(12, 186);
+        _chkDpiAssist.Text = "DPI assist (GoodbyeDPI TLS fragment — GFW-knocker style)";
+        _chkDpiAssist.ForeColor = Color.WhiteSmoke;
+        _chkDpiAssist.BackColor = Color.Transparent;
+        _chkDpiAssist.Checked = true;
+
         _lblPreset.AutoSize = true;
-        _lblPreset.Location = new Point(12, 178);
+        _lblPreset.Location = new Point(12, 218);
         _lblPreset.Text = "Rules preset";
-        _cmbPreset.Location = new Point(100, 174);
+        _cmbPreset.Location = new Point(100, 214);
         _cmbPreset.Size = new Size(260, 28);
         _cmbPreset.DropDownStyle = ComboBoxStyle.DropDownList;
         StyleCombo(_cmbPreset);
@@ -116,17 +142,17 @@ public class FormGeoHideWarp : Form
             "Gaming Smart DNS template"
         });
         _cmbPreset.SelectedIndex = 0;
-        StyleBtn(_btnImportPreset, "Import into Rules", new Point(372, 172), 150);
+        StyleBtn(_btnImportPreset, "Import into Rules", new Point(372, 212), 150);
         _btnImportPreset.Click += async (_, _) => await ImportSelectedPresetAsync(silent: false);
 
         _chkImportAfterConnect.AutoSize = true;
-        _chkImportAfterConnect.Location = new Point(12, 210);
+        _chkImportAfterConnect.Location = new Point(12, 248);
         _chkImportAfterConnect.Text = "Also import selected preset after successful connect";
         _chkImportAfterConnect.ForeColor = Color.WhiteSmoke;
         _chkImportAfterConnect.BackColor = Color.Transparent;
         _chkImportAfterConnect.Checked = false;
 
-        _log.Location = new Point(12, 240);
+        _log.Location = new Point(12, 278);
         _log.Size = new Size(616, 230);
         _log.Multiline = true;
         _log.ScrollBars = ScrollBars.Vertical;
@@ -136,15 +162,16 @@ public class FormGeoHideWarp : Form
         _log.BorderStyle = BorderStyle.FixedSingle;
 
         _lblFoot.AutoSize = false;
-        _lblFoot.Location = new Point(12, 478);
-        _lblFoot.Size = new Size(616, 36);
-        _lblFoot.Text = "Tip: after importing rules while DNS/Share is running, DNSveil re-applies them. Keep WARP Connected while you need a Cloudflare exit IP.";
+        _lblFoot.Location = new Point(12, 514);
+        _lblFoot.Size = new Size(616, 40);
+        _lblFoot.Text = "Auto-find under censorship: GoodbyeDPI fragment → MASQUE h3-with-h2-fallback → IRCF/CF :443 scan → connect. Keep WARP Connected while you need a Cloudflare exit IP.";
 
         Controls.AddRange(new Control[]
         {
             _lblHelp, _lblStatus, _lblIp, _btnRefresh,
             _lblEp, _cmbEndpoint, _lblProto, _cmbProtocol,
             _btnConnect, _btnDisconnect, _btnAuto, _btnCancel, _btnInstall, _btnHelp,
+            _chkCensorship, _chkDpiAssist,
             _lblPreset, _cmbPreset, _btnImportPreset, _chkImportAfterConnect,
             _log, _lblFoot
         });
@@ -168,7 +195,7 @@ public class FormGeoHideWarp : Form
             else if (!WarpCli.IsServiceRunning())
                 Log("warp-cli found, but WARP service is not running — open the official WARP app once.");
             else
-                Log("warp-cli found.");
+                Log("warp-cli found. Censorship mode ON — use Auto-find.");
             await RefreshStatusAsync();
         };
         FormClosing += (_, _) =>
@@ -199,7 +226,7 @@ public class FormGeoHideWarp : Form
         _reloadingEndpoints = true;
         try
         {
-            string protocol = _cmbProtocol.SelectedItem?.ToString() ?? "WireGuard";
+            string protocol = _cmbProtocol.SelectedItem?.ToString() ?? "MASQUE";
             string keep = _cmbEndpoint.Text;
             _cmbEndpoint.BeginUpdate();
             _cmbEndpoint.Items.Clear();
@@ -253,6 +280,8 @@ public class FormGeoHideWarp : Form
         _cmbEndpoint.Enabled = !busy;
         _cmbProtocol.Enabled = !busy;
         _cmbPreset.Enabled = !busy;
+        _chkCensorship.Enabled = !busy;
+        _chkDpiAssist.Enabled = !busy;
     }
 
     private async Task RefreshStatusAsync()
@@ -306,20 +335,44 @@ public class FormGeoHideWarp : Form
         var progress = new Progress<string>(Log);
         try
         {
-            string protocol = _cmbProtocol.SelectedItem?.ToString() ?? "WireGuard";
+            string protocol = _cmbProtocol.SelectedItem?.ToString() ?? "MASQUE";
+            bool censorship = _chkCensorship.Checked || auto; // Auto-find always uses censorship path
+            bool dpi = _chkDpiAssist.Checked;
+
+            var opt = new WarpCli.CensorshipOptions
+            {
+                Enabled = censorship,
+                DpiAssist = dpi,
+                MaxCandidates = censorship ? 120 : 32,
+                MaxConnectAttempts = censorship ? 20 : 12,
+                CidrSamplePerRange = censorship ? 56 : 16,
+            };
+
             IEnumerable<string>? endpoints;
             if (auto)
             {
-                endpoints = WarpCli.EnumerateEndpointCandidates(protocol, 32);
-                Log("Auto-scanning: parallel probe then fast connect…");
+                endpoints = null; // BuildCensorshipCandidatesAsync inside TryConnect
+                Log(censorship
+                    ? "Auto-find (censorship): DPI assist → MASQUE/H2 → IRCF + CF CIDR scan…"
+                    : "Auto-scanning endpoints…");
             }
             else
             {
                 string selected = _cmbEndpoint.Text.Trim();
                 if (string.IsNullOrEmpty(selected) || selected.StartsWith("("))
                 {
-                    endpoints = null;
-                    Log("Connecting with Cloudflare default endpoint…");
+                    endpoints = censorship ? null : Array.Empty<string>().AsEnumerable();
+                    // empty list with censorship=false uses default; with censorship=true builds candidates
+                    if (censorship)
+                    {
+                        endpoints = null;
+                        Log("Connect (censorship): scanning clean endpoints…");
+                    }
+                    else
+                    {
+                        endpoints = Array.Empty<string>();
+                        Log("Connecting with Cloudflare default endpoint…");
+                    }
                 }
                 else
                 {
@@ -327,8 +380,16 @@ public class FormGeoHideWarp : Form
                 }
             }
 
+            // Empty enumerable vs null: TryConnect treats null/empty differently when censorship on.
+            // Pass null to trigger candidate build when censorship and no explicit endpoint.
+            List<string>? endpointList = endpoints?.ToList();
+            if (censorship && (endpointList == null || endpointList.Count == 0) && auto)
+                endpointList = null;
+            else if (!censorship && endpointList != null && endpointList.Count == 0)
+                endpointList = new List<string>(); // empty → default endpoint path
+
             var (ok, message, ep, usedProtocol) = await WarpCli.TryConnectWithFallbackAsync(
-                endpoints, protocol, progress, _cts.Token).ConfigureAwait(true);
+                endpointList, protocol, progress, _cts.Token, opt).ConfigureAwait(true);
             Log(message);
             if (!string.IsNullOrEmpty(usedProtocol) &&
                 !usedProtocol.Equals(_cmbProtocol.SelectedItem?.ToString(), StringComparison.OrdinalIgnoreCase))
