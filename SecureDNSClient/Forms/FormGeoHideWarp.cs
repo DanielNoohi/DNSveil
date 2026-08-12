@@ -310,8 +310,8 @@ public class FormGeoHideWarp : Form
             IEnumerable<string>? endpoints;
             if (auto)
             {
-                endpoints = WarpCli.EnumerateEndpointCandidates(protocol, 16);
-                Log("Auto-scanning endpoints (PyWarp-style)…");
+                endpoints = WarpCli.EnumerateEndpointCandidates(protocol, 32);
+                Log("Auto-scanning: parallel probe then fast connect…");
             }
             else
             {

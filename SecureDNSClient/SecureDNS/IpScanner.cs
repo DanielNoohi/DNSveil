@@ -1,6 +1,8 @@
 ﻿using MsmhToolsClass;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
+using System.Net.Sockets;
 
 namespace SecureDNSClient;
 
@@ -16,196 +18,150 @@ public class IpScannerResult
 
 public class IpScanner
 {
-    private List<IpScannerResult> WorkingIPs { get; set; } = new();
+    private readonly List<IpScannerResult> WorkingIPs = new();
     private List<string> CIDR_List { get; set; } = new();
-    private List<IPAddress> AllIPs { get; set; } = new();
-    private bool StopScan { get; set; } = false;
+    private CancellationTokenSource? _cts;
+    private int _checkedCount;
 
-    // Public
-    public bool IsRunning { get; private set; } = false;
+    public bool IsRunning { get; private set; }
     public int CheckPort { get; set; } = 443;
 
-    /// <summary>
-    /// An open website with chosen CDN to check. e.g. https://www.cloudflare.com
-    /// </summary>
+    /// <summary>An open website with chosen CDN to check. e.g. https://www.cloudflare.com</summary>
     public string CheckWebsite { get; set; } = "https://www.cloudflare.com";
 
-    /// <summary>
-    /// Timeout/Delay (ms)
-    /// </summary>
-    public int Timeout { get; set; }
+    /// <summary>HTTP check timeout (ms). TCP prefilter uses a shorter fraction of this.</summary>
+    public int Timeout { get; set; } = 1000;
+
+    /// <summary>How many IPs to probe at once (TCP+HTTP).</summary>
+    public int Parallelism { get; set; } = 48;
+
     public bool RandomScan { get; set; } = true;
 
-    /// <summary>
-    /// Sender is IpScannerResult
-    /// </summary>
+    /// <summary>When false, ICMP is measured but not required for a hit (much faster / works when ping is blocked).</summary>
+    public bool RequirePing { get; set; } = false;
+
     public event EventHandler<EventArgs>? OnWorkingIpReceived;
     public event EventHandler<EventArgs>? OnNewIpCheck;
     public event EventHandler<EventArgs>? OnNumberOfCheckedIpChanged;
     public event EventHandler<EventArgs>? OnPercentChanged;
     public event EventHandler<EventArgs>? OnFullReportChanged;
 
-    public IpScanner() { }
+    public List<IpScannerResult> GetWorkingIPs => WorkingIPs;
 
-    /// <summary>
-    /// Find Clean IPs
-    /// </summary>
-    /// <param name="cidrList">A List Of CIDR</param>
-    public void SetIpRange(List<string> cidrList)
-    {
-        CIDR_List = cidrList;
-    }
+    public int GetAllIPsCount { get; private set; }
 
-    public List<IpScannerResult> GetWorkingIPs
-    {
-        get => WorkingIPs;
-    }
-
-    public int GetAllIPsCount
-    {
-        get => AllIPs.Count;
-    }
+    public void SetIpRange(List<string> cidrList) => CIDR_List = cidrList;
 
     public void Stop()
     {
-        StopScan = true;
+        try { _cts?.Cancel(); } catch { /* ignore */ }
     }
 
     public void Start()
     {
-        try
+        if (IsRunning) return;
+        IsRunning = true;
+        WorkingIPs.Clear();
+        _checkedCount = 0;
+        GetAllIPsCount = 0;
+        _cts?.Dispose();
+        _cts = new CancellationTokenSource();
+        CancellationToken ct = _cts.Token;
+
+        int parallelism = Math.Clamp(Parallelism, 1, 256);
+        int httpTimeout = Math.Clamp(Timeout, 200, 15_000);
+        int tcpTimeout = Math.Clamp(httpTimeout / 3, 150, 800);
+
+        _ = Task.Run(async () =>
         {
-            IsRunning = true;
-            StopScan = false;
-            if (AllIPs.Any()) AllIPs.Clear();
-
-            Random random = new();
-
-            Task.Run(async () =>
+            IPRange? ipRange = null;
+            try
             {
-                IPRange ipRange = new(CIDR_List);
-                ipRange.StartGenerateIPs();
-                await Task.Delay(100);
+                NetworkTool.URL urid = NetworkTool.GetUrlOrDomainDetails(CheckWebsite, CheckPort);
+                string urlScheme = CheckWebsite.Contains("://", StringComparison.Ordinal)
+                    ? CheckWebsite.Split("://", 2)[0].Trim().ToLowerInvariant() + "://"
+                    : "https://";
+                string checkUrl = $"{urlScheme}{urid.Host}:{CheckPort}";
 
-                int pauseDelayMs = 1;
+                ipRange = new IPRange(CIDR_List);
+                ipRange.StartGenerateIPs();
+                await Task.Delay(80, ct).ConfigureAwait(false);
+
                 int startIndex = 0;
-                while (true)
+                while (!ct.IsCancellationRequested)
                 {
-                    if (StopScan)
+                    ipRange.Pause(true);
+                    await Task.Delay(1, ct).ConfigureAwait(false);
+
+                    List<IPAddress> batch = ipRange.IPs.GetRange(startIndex, ipRange.IPs.Count - startIndex);
+                    startIndex = ipRange.IPs.Count;
+                    GetAllIPsCount = Math.Max(GetAllIPsCount, startIndex);
+
+                    if (batch.Count == 0)
                     {
-                        ipRange.Dispose();
-                        IsRunning = false;
-                        return;
+                        ipRange.Pause(false);
+                        await Task.Delay(30, ct).ConfigureAwait(false);
+                        if (!ipRange.IsRunning) break;
+                        continue;
                     }
 
-                    ipRange.Pause(true);
-                    await Task.Delay(pauseDelayMs);
+                    if (RandomScan)
+                        Shuffle(batch);
 
-                    AllIPs = ipRange.IPs.GetRange(startIndex, ipRange.IPs.Count - startIndex);
-                    startIndex = ipRange.IPs.Count;
-
-                    for (int n = 0; n < AllIPs.Count; n++)
-                    {
-                        if (StopScan)
+                    await Parallel.ForEachAsync(
+                        batch,
+                        new ParallelOptions { MaxDegreeOfParallelism = parallelism, CancellationToken = ct },
+                        async (ip, token) =>
                         {
-                            ipRange.Dispose();
-                            IsRunning = false;
-                            return;
-                        }
-
-                        OnNumberOfCheckedIpChanged?.Invoke(n, EventArgs.Empty);
-
-                        int percent = 0;
-                        if (n > 0 && n < AllIPs.Count - 1)
-                            percent = (n * 100) / AllIPs.Count;
-                        if (n == AllIPs.Count - 1)
-                            percent = 100;
-                        OnPercentChanged?.Invoke(percent, EventArgs.Empty);
-
-                        string ipOut = AllIPs[n].ToString();
-
-                        if (RandomScan)
-                        {
-                            int rn = random.Next(AllIPs.Count);
-                            ipOut = AllIPs[rn].ToString();
-                        }
-
-                        OnNewIpCheck?.Invoke(ipOut, EventArgs.Empty);
-                        OnFullReportChanged?.Invoke($"Checking: {ipOut} ({n} of {AllIPs.Count}) {percent}%", EventArgs.Empty);
-
-                        // Real Delay
-                        int realDelayOut = -1;
-                        try
-                        {
-                            // Real Delay
-                            string urlScheme = string.Empty;
-                            if (CheckWebsite.Contains("://"))
-                            {
-                                string[] split = CheckWebsite.Split("://");
-                                urlScheme = $"{split[0].Trim().ToLower()}://";
-                            }
-                            NetworkTool.URL urid = NetworkTool.GetUrlOrDomainDetails(CheckWebsite, CheckPort);
-                            string url = $"{urlScheme}{urid.Host}:{CheckPort}";
-
-                            Stopwatch realDelay = new();
-                            realDelay.Start();
-                            HttpStatusCode hsc = await NetworkTool.GetHttpStatusCodeAsync(url, ipOut, Timeout, true, false, false);
-                            realDelay.Stop();
-
-                            Debug.WriteLine("HttpStatusCode: " + hsc);
-
-                            if (hsc == HttpStatusCode.OK)
-                                realDelayOut = Convert.ToInt32(realDelay.ElapsedMilliseconds);
-
-                            realDelay.Reset();
-                        }
-                        catch (Exception)
-                        {
-                            realDelayOut = -1;
-                        }
-
-                        Debug.WriteLine("Real Delay: " + realDelayOut);
-
-                        if (realDelayOut != -1)
-                        {
-                            // Ping Delay
-                            int pingDelayOut = -1;
+                            string ipOut = ip.ToString();
+                            int checkedNow = Interlocked.Increment(ref _checkedCount);
                             try
                             {
-                                Stopwatch pingDelay = new();
-                                pingDelay.Start();
-                                bool canPing = await NetworkTool.CanPingAsync(ipOut, Timeout);
-                                pingDelay.Stop();
+                                OnNewIpCheck?.Invoke(ipOut, EventArgs.Empty);
+                                OnNumberOfCheckedIpChanged?.Invoke(checkedNow, EventArgs.Empty);
+                                if (checkedNow % 8 == 0 || checkedNow <= 3)
+                                {
+                                    int percent = GetAllIPsCount > 0
+                                        ? Math.Min(99, (checkedNow * 100) / Math.Max(GetAllIPsCount, 1))
+                                        : 0;
+                                    OnPercentChanged?.Invoke(percent, EventArgs.Empty);
+                                    OnFullReportChanged?.Invoke(
+                                        $"Checking: {ipOut} ({checkedNow} checked, {WorkingIPs.Count} hits, x{parallelism})",
+                                        EventArgs.Empty);
+                                }
 
-                                if (canPing) pingDelayOut = Convert.ToInt32(pingDelay.ElapsedMilliseconds);
-                                pingDelay.Reset();
-                            }
-                            catch (Exception)
-                            {
-                                pingDelayOut = -1;
-                            }
+                                // 1) Cheap TCP prefilter — most CF IPs fail here in <tcpTimeout ms
+                                Stopwatch swTcp = Stopwatch.StartNew();
+                                bool tcpOk = await FastTcpConnectAsync(ipOut, CheckPort, tcpTimeout, token).ConfigureAwait(false);
+                                swTcp.Stop();
+                                if (!tcpOk) return;
 
-                            // Tcp delay
-                            int tcpDelayOut = -1;
-                            try
-                            {
-                                Stopwatch tcpDelay = new();
-                                tcpDelay.Start();
-                                bool canTcpConnect = await NetworkTool.CanTcpConnectAsync(ipOut, CheckPort, Timeout);
-                                tcpDelay.Stop();
+                                int tcpDelayOut = (int)swTcp.ElapsedMilliseconds;
 
-                                if (canTcpConnect) tcpDelayOut = Convert.ToInt32(tcpDelay.ElapsedMilliseconds);
-                                tcpDelay.Reset();
-                            }
-                            catch (Exception)
-                            {
-                                tcpDelayOut = -1;
-                            }
+                                // 2) HTTPS with Host header to candidate IP (only survivors)
+                                Stopwatch swHttp = Stopwatch.StartNew();
+                                HttpStatusCode hsc = await NetworkTool.GetHttpStatusCodeAsync(
+                                    checkUrl, ipOut, httpTimeout, true, false, false,
+                                    null, null, null, token).ConfigureAwait(false);
+                                swHttp.Stop();
+                                if (hsc != HttpStatusCode.OK) return;
 
-                            // Result
-                            if (tcpDelayOut != -1 && pingDelayOut != -1)
-                            {
-                                IpScannerResult scannerResult = new()
+                                int realDelayOut = (int)swHttp.ElapsedMilliseconds;
+
+                                // 3) Optional ping (display only unless RequirePing)
+                                int pingDelayOut = -1;
+                                try
+                                {
+                                    Stopwatch swPing = Stopwatch.StartNew();
+                                    bool canPing = await NetworkTool.CanPingAsync(ipOut, Math.Min(httpTimeout, 800)).ConfigureAwait(false);
+                                    swPing.Stop();
+                                    if (canPing) pingDelayOut = (int)swPing.ElapsedMilliseconds;
+                                }
+                                catch { /* ignore */ }
+
+                                if (RequirePing && pingDelayOut < 0) return;
+
+                                var result = new IpScannerResult
                                 {
                                     IP = ipOut,
                                     RealDelay = realDelayOut,
@@ -213,23 +169,67 @@ public class IpScanner
                                     PingDelay = pingDelayOut
                                 };
 
-                                OnWorkingIpReceived?.Invoke(scannerResult, EventArgs.Empty);
-                                WorkingIPs.Add(scannerResult);
+                                lock (WorkingIPs) WorkingIPs.Add(result);
+                                OnWorkingIpReceived?.Invoke(result, EventArgs.Empty);
                             }
-                        }
+                            catch (OperationCanceledException) { throw; }
+                            catch (Exception ex)
+                            {
+                                Debug.WriteLine("IpScanner probe: " + ex.Message);
+                            }
+                        }).ConfigureAwait(false);
 
-                    }
-
-                    AllIPs.Clear();
                     ipRange.Pause(false);
-                    await Task.Delay(pauseDelayMs);
-                    if (!ipRange.IsRunning) StopScan = true;
+                    await Task.Delay(1, ct).ConfigureAwait(false);
+                    if (!ipRange.IsRunning && startIndex >= ipRange.IPs.Count) break;
                 }
-            });
-        }
-        catch (Exception ex)
+
+                OnPercentChanged?.Invoke(100, EventArgs.Empty);
+                OnFullReportChanged?.Invoke(
+                    $"Done. Checked {_checkedCount}, found {WorkingIPs.Count} clean IP(s).",
+                    EventArgs.Empty);
+            }
+            catch (OperationCanceledException)
+            {
+                OnFullReportChanged?.Invoke(
+                    $"Stopped. Checked {_checkedCount}, found {WorkingIPs.Count} clean IP(s).",
+                    EventArgs.Empty);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("IpScanner Start: " + ex.Message);
+            }
+            finally
+            {
+                try { ipRange?.Dispose(); } catch { /* ignore */ }
+                IsRunning = false;
+            }
+        }, ct);
+    }
+
+    private static async Task<bool> FastTcpConnectAsync(string hostOrIp, int port, int timeoutMs, CancellationToken ct)
+    {
+        try
         {
-            Debug.WriteLine("IpScanner Start: " + ex.Message);
+            using var client = new TcpClient();
+            client.NoDelay = true;
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            linked.CancelAfter(timeoutMs);
+            await client.ConnectAsync(hostOrIp, port, linked.Token).ConfigureAwait(false);
+            return client.Connected;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void Shuffle<T>(IList<T> list)
+    {
+        for (int i = list.Count - 1; i > 0; i--)
+        {
+            int j = Random.Shared.Next(i + 1);
+            (list[i], list[j]) = (list[j], list[i]);
         }
     }
 }

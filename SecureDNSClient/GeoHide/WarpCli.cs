@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net.Http;
 using System.Text;
@@ -307,18 +308,31 @@ public static class WarpCli
         {
             progress?.Report($"Connecting with Cloudflare default endpoint ({preferredProtocol})…");
             ResetEndpoint();
-            if (await PollConnectedAsync(progress, ct).ConfigureAwait(false))
+            if (await PollConnectedAsync(progress, verifyWarpOn: true, ct).ConfigureAwait(false))
                 return (true, $"Connected via default endpoint ({preferredProtocol}).", null, preferredProtocol);
             progress?.Report("Default endpoint failed: " + ParseStatus(Status()));
         }
         else
         {
+            // Parallel reachability prefilter — skip dead host:ports before slow warp-cli connect loops.
+            progress?.Report($"Probing {list.Count} endpoints in parallel…");
+            List<string> reachable = await FilterReachableEndpointsAsync(list, preferredProtocol, progress, ct).ConfigureAwait(false);
+            if (reachable.Count == 0)
+            {
+                progress?.Report("No endpoints responded to probe — trying full list anyway (top 8)…");
+                reachable = list.Take(8).ToList();
+            }
+            else
+            {
+                progress?.Report($"{reachable.Count}/{list.Count} endpoints look reachable — connecting…");
+            }
+
             int n = 0;
-            foreach (string endpoint in list)
+            foreach (string endpoint in reachable)
             {
                 ct.ThrowIfCancellationRequested();
                 n++;
-                progress?.Report($"[{n}/{list.Count}] Trying {endpoint} ({preferredProtocol})…");
+                progress?.Report($"[{n}/{reachable.Count}] Connecting {endpoint} ({preferredProtocol})…");
                 Disconnect();
                 Result setEp = SetEndpoint(endpoint);
                 if (!setEp.Ok)
@@ -327,11 +341,18 @@ public static class WarpCli
                     continue;
                 }
 
-                if (await PollConnectedAsync(progress, ct).ConfigureAwait(false))
-                    return (true, $"Connected via {endpoint} ({preferredProtocol}).", endpoint, preferredProtocol);
-
-                string reason = ParseStatus(Status());
-                progress?.Report($"No connect on {endpoint}: {reason}");
+                // Fast poll during auto-find; verify warp=on only on success path.
+                if (await PollConnectedAsync(progress, verifyWarpOn: false, ct).ConfigureAwait(false))
+                {
+                    PublicIpInfo info = await FetchPublicIpInfoAsync(4000).ConfigureAwait(false);
+                    if (info.WarpOn != false) // true or unknown
+                        return (true, $"Connected via {endpoint} ({preferredProtocol}).", endpoint, preferredProtocol);
+                    progress?.Report("Status connected but warp=off — trying next…");
+                }
+                else
+                {
+                    progress?.Report($"No connect on {endpoint}: {ParseStatus(Status())}");
+                }
             }
         }
 
@@ -343,41 +364,116 @@ public static class WarpCli
             ResetEndpoint();
             SetProtocol("MASQUE");
             SetMasqueOptions("h3-with-h2-fallback");
-            if (await PollConnectedAsync(progress, ct).ConfigureAwait(false))
+            if (await PollConnectedAsync(progress, verifyWarpOn: true, ct).ConfigureAwait(false))
                 return (true, "Connected via default endpoint (MASQUE).", null, "MASQUE");
         }
 
         return (false, "Could not connect. Your ISP may block WARP; try MASQUE, another endpoint, or another network.", null, preferredProtocol);
     }
 
-    private static async Task<bool> PollConnectedAsync(IProgress<string>? progress, CancellationToken ct)
+    /// <summary>
+    /// Parallel TCP probe of engage IPs. For WireGuard UDP ports we still probe TCP on 443 of the same host
+    /// as a cheap "is this Cloudflare edge reachable?" filter, then keep original endpoint strings ordered by RTT.
+    /// </summary>
+    public static async Task<List<string>> FilterReachableEndpointsAsync(
+        IList<string> endpoints,
+        string protocol,
+        IProgress<string>? progress,
+        CancellationToken ct)
+    {
+        bool masque = protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase);
+        var scored = new ConcurrentBag<(string Ep, int Ms)>();
+
+        await Parallel.ForEachAsync(
+            endpoints,
+            new ParallelOptions { MaxDegreeOfParallelism = 64, CancellationToken = ct },
+            async (ep, token) =>
+            {
+                if (!TryParseHostPort(ep, out string host, out int port)) return;
+
+                int probePort = masque ? port : 443; // WG is UDP; use TCP/443 on same host as reachability signal
+                int ms = await MeasureTcpMsAsync(host, probePort, 350, token).ConfigureAwait(false);
+                if (ms >= 0)
+                    scored.Add((ep, ms));
+                else if (masque)
+                {
+                    // try alternate MASQUE port quickly
+                    int alt = port == 443 ? 8443 : 443;
+                    ms = await MeasureTcpMsAsync(host, alt, 350, token).ConfigureAwait(false);
+                    if (ms >= 0) scored.Add((ep, ms + 50));
+                }
+            }).ConfigureAwait(false);
+
+        List<string> ordered = scored
+            .OrderBy(x => x.Ms)
+            .Select(x => x.Ep)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(12)
+            .ToList();
+
+        progress?.Report(ordered.Count > 0
+            ? $"Fastest probe: {ordered[0]} (~{scored.First(s => s.Ep == ordered[0]).Ms}ms)"
+            : "Reachability probe found no open TCP ports.");
+        return ordered;
+    }
+
+    private static bool TryParseHostPort(string endpoint, out string host, out int port)
+    {
+        host = "";
+        port = 0;
+        int idx = endpoint.LastIndexOf(':');
+        if (idx <= 0 || idx >= endpoint.Length - 1) return false;
+        host = endpoint[..idx].Trim();
+        return int.TryParse(endpoint[(idx + 1)..], out port) && port > 0 && port <= 65535 && host.Length > 0;
+    }
+
+    private static async Task<int> MeasureTcpMsAsync(string host, int port, int timeoutMs, CancellationToken ct)
+    {
+        try
+        {
+            var sw = Stopwatch.StartNew();
+            using var client = new System.Net.Sockets.TcpClient();
+            client.NoDelay = true;
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            linked.CancelAfter(timeoutMs);
+            await client.ConnectAsync(host, port, linked.Token).ConfigureAwait(false);
+            sw.Stop();
+            return client.Connected ? (int)sw.ElapsedMilliseconds : -1;
+        }
+        catch
+        {
+            return -1;
+        }
+    }
+
+    private static async Task<bool> PollConnectedAsync(IProgress<string>? progress, bool verifyWarpOn, CancellationToken ct)
     {
         Connect();
-        // ~14s window; exit early on Failed / stable Disconnected.
-        for (int i = 0; i < 20; i++)
+        // Fast window (~3.5s). Auto-find tries many endpoints — keep each attempt short.
+        int loops = verifyWarpOn ? 12 : 8;
+        for (int i = 0; i < loops; i++)
         {
-            await Task.Delay(700, ct).ConfigureAwait(false);
+            await Task.Delay(400, ct).ConfigureAwait(false);
             Result st = Status();
             string parsed = ParseStatus(st);
             if (parsed.Contains("Failed", StringComparison.OrdinalIgnoreCase))
                 return false;
-            if (i >= 3 && parsed.Contains("Disconnected", StringComparison.OrdinalIgnoreCase))
-                return false;
-            if (parsed.Contains("Not connected", StringComparison.OrdinalIgnoreCase) && i >= 3)
+            if (i >= 2 && (parsed.Contains("Disconnected", StringComparison.OrdinalIgnoreCase) ||
+                           parsed.Contains("Not connected", StringComparison.OrdinalIgnoreCase)))
                 return false;
 
             if (!IsConnected(st)) continue;
 
-            // Confirm egress actually uses WARP (status alone can lie briefly).
-            PublicIpInfo info = await FetchPublicIpInfoAsync(5000).ConfigureAwait(false);
-            if (info.WarpOn == true)
-                return true;
+            if (!verifyWarpOn) return true;
+
+            PublicIpInfo info = await FetchPublicIpInfoAsync(3500).ConfigureAwait(false);
+            if (info.WarpOn == true) return true;
             if (info.WarpOn == false)
                 progress?.Report("warp-cli says Connected but trace shows warp=off — waiting…");
-            else if (i >= 8)
-                return true; // trace unreachable; trust status after enough Connected polls
+            else if (i >= 5)
+                return true;
         }
-        return false;
+        return IsConnected(Status());
     }
 
     public sealed class PublicIpInfo

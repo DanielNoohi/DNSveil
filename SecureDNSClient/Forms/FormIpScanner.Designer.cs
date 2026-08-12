@@ -83,7 +83,7 @@
             CustomLabelDelay.RoundedCorners = 0;
             CustomLabelDelay.Size = new Size(95, 17);
             CustomLabelDelay.TabIndex = 1;
-            CustomLabelDelay.Text = "Real Delay (Sec):";
+            CustomLabelDelay.Text = "Timeout (Sec):";
             // 
             // CustomNumericUpDownDelay
             // 
@@ -92,12 +92,14 @@
             CustomNumericUpDownDelay.BorderStyle = BorderStyle.FixedSingle;
             CustomNumericUpDownDelay.Location = new Point(206, 8);
             CustomNumericUpDownDelay.Maximum = new decimal(new int[] { 10, 0, 0, 0 });
-            CustomNumericUpDownDelay.Minimum = new decimal(new int[] { 1, 0, 0, 0 });
+            CustomNumericUpDownDelay.Minimum = new decimal(new int[] { 5, 0, 0, 65536 }); // 0.5
+            CustomNumericUpDownDelay.DecimalPlaces = 1;
+            CustomNumericUpDownDelay.Increment = new decimal(new int[] { 5, 0, 0, 65536 }); // 0.5
             CustomNumericUpDownDelay.Name = "CustomNumericUpDownDelay";
             CustomNumericUpDownDelay.RoundedCorners = 5;
-            CustomNumericUpDownDelay.Size = new Size(45, 23);
+            CustomNumericUpDownDelay.Size = new Size(50, 23);
             CustomNumericUpDownDelay.TabIndex = 2;
-            CustomNumericUpDownDelay.Value = new decimal(new int[] { 2, 0, 0, 0 });
+            CustomNumericUpDownDelay.Value = new decimal(new int[] { 1, 0, 0, 0 }); // 1.0s default
             // 
             // CustomButtonStartStop
             // 

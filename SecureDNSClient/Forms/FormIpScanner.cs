@@ -95,6 +95,36 @@ public partial class FormIpScanner : Form
         CustomCheckBoxRandomScan.Left = spaceRight;
         CustomCheckBoxRandomScan.Top = CustomNumericUpDownCheckIpWithThisPort.Bottom + spaceV;
 
+        // Parallelism control (added at runtime for fast scanning)
+        if (Controls.Find("CustomLabelParallel", false).Length == 0)
+        {
+            var lblPar = new CustomLabel
+            {
+                Name = "CustomLabelParallel",
+                AutoSize = true,
+                Text = "Parallel:",
+                Left = CustomCheckBoxRandomScan.Right + spaceHH,
+                Top = CustomCheckBoxRandomScan.Top
+            };
+            var numPar = new CustomNumericUpDown
+            {
+                Name = "CustomNumericUpDownParallel",
+                Minimum = 1,
+                Maximum = 128,
+                Value = 48,
+                Left = lblPar.Right + spaceH,
+                Top = CustomCheckBoxRandomScan.Top - 2,
+                Width = 55,
+                RoundedCorners = 5,
+                BorderColor = Color.Blue,
+                BackColor = Color.DimGray
+            };
+            Controls.Add(lblPar);
+            Controls.Add(numPar);
+            lblPar.BringToFront();
+            numPar.BringToFront();
+        }
+
         CustomLabelChecking.Left = spaceRight;
         CustomLabelChecking.Top = CustomCheckBoxRandomScan.Bottom + spaceV;
         CustomLabelChecking.Width = ClientRectangle.Width - (spaceRight * 2);
@@ -172,7 +202,12 @@ public partial class FormIpScanner : Form
                 Scanner.CheckPort = Convert.ToInt32(CustomNumericUpDownCheckIpWithThisPort.Value);
                 Scanner.CheckWebsite = CustomTextBoxCheckWebsite.Text;
                 Scanner.RandomScan = CustomCheckBoxRandomScan.Checked;
-                Scanner.Timeout = Convert.ToInt32(CustomNumericUpDownDelay.Value * 1000);
+                Scanner.Timeout = Math.Max(200, Convert.ToInt32(CustomNumericUpDownDelay.Value * 1000m));
+                Scanner.RequirePing = false;
+                Control[] par = Controls.Find("CustomNumericUpDownParallel", false);
+                Scanner.Parallelism = par.Length > 0 && par[0] is CustomNumericUpDown nud
+                    ? Convert.ToInt32(nud.Value)
+                    : 48;
 
                 Scanner.OnWorkingIpReceived -= Scanner_OnWorkingIpReceived;
                 Scanner.OnWorkingIpReceived += Scanner_OnWorkingIpReceived;
