@@ -40,5 +40,6 @@ Traffic leaves through Cloudflare’s network. Destinations see a **Cloudflare e
 ## Notes
 
 - Low-latency/gaming sets `tunnel_only` **before** connect and does not re-apply mode after a proven tunnel (re-applying dropped sessions).
-- Each Connect/Auto-find writes diagnostics under `UserData/GeoHideLogs/` (`session-*.log` + `session-*.jsonl`) for later debugging.
+- Success requires Cloudflare trace `warp=on` (status Connected alone is not enough).
+- Each Connect writes diagnostics under `UserData/GeoHideLogs/` (`session-*.log` + `session-*.jsonl`). High-signal phases: `env`, `decision`, `egress`, `attempt_result`, `status_change`.
 - Core DNSveil features (DoH, Share Fragment) still do **not** replace a tunnel for IP hiding; WARP is the GeoHide companion.

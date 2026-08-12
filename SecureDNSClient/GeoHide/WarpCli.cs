@@ -464,10 +464,11 @@ public static class WarpCli
                 ["iranExcludes"] = censorship.ApplyIranExcludes,
                 ["wgUpgrade"] = censorship.TryWireGuardUpgrade,
             });
+        LogEnvironmentSnapshot();
 
         if (!IsInstalled())
         {
-            WarpSessionLog.Step("connect", "warp-cli not installed");
+            WarpSessionLog.Decision("reject", "warp-cli not installed");
             return (false, "Cloudflare WARP (warp-cli) is not installed.", null, preferredProtocol);
         }
 
@@ -601,43 +602,86 @@ public static class WarpCli
                 ct.ThrowIfCancellationRequested();
                 n++;
                 progress?.Report($"[{n}/{reachable.Count}] Connecting {endpoint} ({protocol})…");
-                WarpSessionLog.Step("attempt", $"[{n}/{reachable.Count}] {endpoint} ({protocol})");
+                WarpSessionLog.BeginAttempt(endpoint, protocol, n, reachable.Count);
+                long t0 = WarpSessionLog.ElapsedMs;
                 Disconnect();
                 Result setEp = SetEndpoint(endpoint);
+                WarpSessionLog.Cli("tunnel endpoint set " + endpoint, setEp, always: true);
                 if (!setEp.Ok)
                 {
                     progress?.Report($"Skip {endpoint}: {setEp.ErrorLine}");
-                    WarpSessionLog.Step("attempt", "set-endpoint failed",
+                    WarpSessionLog.AttemptResult(endpoint, protocol, "set-endpoint-failed",
+                        WarpSessionLog.ElapsedMs - t0,
+                        new Dictionary<string, object?> { ["err"] = setEp.ErrorLine });
+                    WarpSessionLog.Decision("reject", "set-endpoint failed",
                         new Dictionary<string, object?> { ["endpoint"] = endpoint, ["err"] = setEp.ErrorLine });
                     continue;
                 }
 
-                if (await PollConnectedAsync(progress, verifyWarpOn: false, ct, longPoll: censorship.Enabled).ConfigureAwait(false))
+                if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: censorship.Enabled).ConfigureAwait(false))
                 {
-                    PublicIpInfo info = await FetchPublicIpInfoAsync(5000).ConfigureAwait(false);
-                    WarpSessionLog.Step("attempt", "poll connected",
+                    PublicIpInfo info = await FetchPublicIpInfoAsync(8000).ConfigureAwait(false);
+                    WarpSessionLog.Egress(info.Source ?? "trace", info,
                         new Dictionary<string, object?>
                         {
                             ["endpoint"] = endpoint,
                             ["protocol"] = protocol,
                             ["status"] = ParseStatus(Status()),
-                            ["ip"] = info.Ip,
-                            ["warpOn"] = info.WarpOn,
-                            ["loc"] = info.Loc,
                         });
-                    if (info.WarpOn != false)
+                    if (info.WarpOn == true)
                     {
+                        WarpSessionLog.AttemptResult(endpoint, protocol, "accept-warp-on",
+                            WarpSessionLog.ElapsedMs - t0,
+                            new Dictionary<string, object?>
+                            {
+                                ["ip"] = info.Ip,
+                                ["loc"] = info.Loc,
+                                ["colo"] = info.Colo,
+                            });
+                        WarpSessionLog.Decision("accept", "Connected + warp=on",
+                            new Dictionary<string, object?>
+                            {
+                                ["endpoint"] = endpoint,
+                                ["protocol"] = protocol,
+                                ["ip"] = info.Ip,
+                                ["loc"] = info.Loc,
+                                ["colo"] = info.Colo,
+                            });
                         return await FinishConnectedAsync(
                             $"Connected via {endpoint} ({protocol}).", endpoint, protocol, censorship, progress, ct).ConfigureAwait(false);
                     }
-                    progress?.Report("Status connected but warp=off — trying next…");
-                    WarpSessionLog.Step("attempt", "warp=off despite Connected status");
+                    progress?.Report("Status connected but warp≠on — trying next…");
+                    WarpSessionLog.AttemptResult(endpoint, protocol, "reject-warp-not-on",
+                        WarpSessionLog.ElapsedMs - t0,
+                        new Dictionary<string, object?>
+                        {
+                            ["warpOn"] = info.WarpOn,
+                            ["ip"] = info.Ip,
+                            ["error"] = info.Error,
+                            ["status"] = ParseStatus(Status()),
+                        });
+                    WarpSessionLog.Decision("reject", "status Connected but egress warp≠on",
+                        new Dictionary<string, object?>
+                        {
+                            ["endpoint"] = endpoint,
+                            ["warpOn"] = info.WarpOn,
+                            ["ip"] = info.Ip,
+                            ["error"] = info.Error,
+                        });
                 }
                 else
                 {
-                    string st = ParseStatus(Status());
+                    Result stFull = Status();
+                    string st = ParseStatus(stFull);
                     progress?.Report($"No connect on {endpoint}: {st}");
-                    WarpSessionLog.Step("attempt", "not connected",
+                    WarpSessionLog.AttemptResult(endpoint, protocol, "reject-not-connected",
+                        WarpSessionLog.ElapsedMs - t0,
+                        new Dictionary<string, object?>
+                        {
+                            ["status"] = st,
+                            ["statusRaw"] = TruncateForLog(stFull.Combined, 400),
+                        });
+                    WarpSessionLog.Decision("reject", "never reached Connected+warp=on",
                         new Dictionary<string, object?> { ["endpoint"] = endpoint, ["status"] = st });
                 }
             }
@@ -700,7 +744,7 @@ public static class WarpCli
             {
                 WarpSessionLog.Step("finish", "lost tunnel after DPI stop; could not restore");
                 return (false,
-                    "Connected briefly, then dropped when stopping DPI assist. Retry Auto-find (log saved).",
+                    "Connected briefly, then dropped when stopping DPI assist. Retry Connect (log saved).",
                     endpoint, protocol);
             }
         }
@@ -736,7 +780,7 @@ public static class WarpCli
                     {
                         WarpSessionLog.Step("finish", "lost tunnel after WG upgrade attempt");
                         return (false,
-                            "Connected on MASQUE, then lost during WireGuard upgrade. Retry Auto-find (log saved).",
+                            "Connected on MASQUE, then lost during WireGuard upgrade. Retry Connect (log saved).",
                             endpoint, protocol);
                     }
                 }
@@ -753,7 +797,7 @@ public static class WarpCli
                     gamingNotes.Add("iran-excludes=failed");
                     WarpSessionLog.Step("gaming", "Iran excludes dropped tunnel; restore failed");
                     return (false,
-                        "Connected, then dropped while applying gaming Iran excludes. Uncheck Low latency and retry, or retry Auto-find (log saved).",
+                        "Connected, then dropped while applying gaming Iran excludes. Uncheck Low latency and retry Connect (log saved).",
                         endpoint, protocol);
                 }
                 gamingNotes.Add("iran-excludes=ok");
@@ -764,7 +808,30 @@ public static class WarpCli
                 : " Low-latency profile applied.";
         }
 
-        PublicIpInfo finalInfo = await FetchPublicIpInfoAsync(5000).ConfigureAwait(false);
+        PublicIpInfo finalInfo = await FetchPublicIpInfoAsync(8000).ConfigureAwait(false);
+        WarpSessionLog.Egress(finalInfo.Source ?? "trace", finalInfo,
+            new Dictionary<string, object?>
+            {
+                ["endpoint"] = usedEndpoint,
+                ["protocol"] = usedProtocol,
+                ["status"] = ParseStatus(Status()),
+                ["phase"] = "finish",
+            });
+
+        if (finalInfo.WarpOn != true)
+        {
+            WarpSessionLog.Decision("reject", "post-connect egress lost warp=on",
+                new Dictionary<string, object?>
+                {
+                    ["warpOn"] = finalInfo.WarpOn,
+                    ["ip"] = finalInfo.Ip,
+                    ["error"] = finalInfo.Error,
+                });
+            return (false,
+                "Tunnel looked up briefly but egress is not warp=on anymore. Retry Connect (log saved).",
+                usedEndpoint, usedProtocol);
+        }
+
         WarpSessionLog.Step("finish", "complete",
             new Dictionary<string, object?>
             {
@@ -775,7 +842,16 @@ public static class WarpCli
                 ["ip"] = finalInfo.Ip,
                 ["warpOn"] = finalInfo.WarpOn,
                 ["loc"] = finalInfo.Loc,
+                ["colo"] = finalInfo.Colo,
                 ["gaming"] = gamingNotes,
+            });
+        WarpSessionLog.Decision("accept", "finish with warp=on",
+            new Dictionary<string, object?>
+            {
+                ["endpoint"] = usedEndpoint,
+                ["protocol"] = usedProtocol,
+                ["ip"] = finalInfo.Ip,
+                ["loc"] = finalInfo.Loc,
             });
 
         return (true, message, usedEndpoint, usedProtocol);
@@ -794,6 +870,15 @@ public static class WarpCli
         Result st = Status();
         bool connected = IsConnected(st);
         PublicIpInfo info = await FetchPublicIpInfoAsync(4000).ConfigureAwait(false);
+        WarpSessionLog.Egress(info.Source ?? "trace", info,
+            new Dictionary<string, object?>
+            {
+                ["phase"] = phase,
+                ["status"] = ParseStatus(st),
+                ["connected"] = connected,
+                ["endpoint"] = endpoint,
+                ["protocol"] = protocol,
+            });
         WarpSessionLog.Step("verify", phase,
             new Dictionary<string, object?>
             {
@@ -802,14 +887,26 @@ public static class WarpCli
                 ["ip"] = info.Ip,
                 ["warpOn"] = info.WarpOn,
                 ["loc"] = info.Loc,
+                ["colo"] = info.Colo,
                 ["endpoint"] = endpoint,
                 ["protocol"] = protocol,
             });
 
-        if (connected && info.WarpOn != false)
+        if (connected && info.WarpOn == true)
             return true;
 
-        progress?.Report($"Tunnel not healthy after {phase} — restoring {endpoint ?? "default"} ({protocol})…");
+        // Status Connected without warp=on is a false positive under DPI — do not accept.
+        if (connected && info.WarpOn != true)
+        {
+            progress?.Report($"warp-cli Connected but egress warp≠on after {phase} — restoring…");
+            WarpSessionLog.Step("verify", $"reject soft-connected after {phase}",
+                new Dictionary<string, object?> { ["warpOn"] = info.WarpOn, ["ip"] = info.Ip });
+        }
+        else
+        {
+            progress?.Report($"Tunnel not healthy after {phase} — restoring {endpoint ?? "default"} ({protocol})…");
+        }
+
         WarpSessionLog.Step("recover", $"restore after {phase}");
         Disconnect();
         SetProtocol(protocol);
@@ -821,15 +918,15 @@ public static class WarpCli
             ResetEndpoint();
 
         bool ok = await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: true).ConfigureAwait(false);
-        PublicIpInfo after = await FetchPublicIpInfoAsync(4000).ConfigureAwait(false);
-        WarpSessionLog.Step("recover", ok ? "restore ok" : "restore failed",
+        PublicIpInfo after = await FetchPublicIpInfoAsync(8000).ConfigureAwait(false);
+        WarpSessionLog.Step("recover", ok && after.WarpOn == true ? "restore ok" : "restore failed",
             new Dictionary<string, object?>
             {
                 ["status"] = ParseStatus(Status()),
                 ["ip"] = after.Ip,
                 ["warpOn"] = after.WarpOn,
             });
-        return ok && after.WarpOn != false;
+        return ok && after.WarpOn == true;
     }
 
     /// <summary>Try same host on classic WG ports — lower overhead than MASQUE/H2 when UDP works.</summary>
@@ -856,10 +953,10 @@ public static class WarpCli
             SetProtocol("WireGuard");
             Result set = SetEndpoint(ep);
             if (!set.Ok) continue;
-            if (!await PollConnectedAsync(progress, verifyWarpOn: false, ct, longPoll: false).ConfigureAwait(false))
+            if (!await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: false).ConfigureAwait(false))
                 continue;
-            PublicIpInfo info = await FetchPublicIpInfoAsync(3000).ConfigureAwait(false);
-            if (info.WarpOn != false)
+            PublicIpInfo info = await FetchPublicIpInfoAsync(5000).ConfigureAwait(false);
+            if (info.WarpOn == true)
                 return (true, ep);
         }
 
@@ -1022,11 +1119,12 @@ public static class WarpCli
         IProgress<string>? progress, bool verifyWarpOn, CancellationToken ct, bool longPoll = false)
     {
         Result connect = Connect();
+        WarpSessionLog.Cli("connect", connect, always: true);
         WarpSessionLog.Step("poll", "connect issued",
             new Dictionary<string, object?>
             {
                 ["ok"] = connect.Ok,
-                ["out"] = connect.Combined,
+                ["out"] = TruncateForLog(connect.Combined, 300),
                 ["verifyWarpOn"] = verifyWarpOn,
                 ["longPoll"] = longPoll,
             });
@@ -1037,15 +1135,19 @@ public static class WarpCli
             await Task.Delay(delay, ct).ConfigureAwait(false);
             Result st = Status();
             string parsed = ParseStatus(st);
+            WarpSessionLog.StatusChange(parsed, new Dictionary<string, object?> { ["i"] = i, ["raw"] = TruncateForLog(st.Combined, 240) });
+
             if (parsed.Contains("Failed", StringComparison.OrdinalIgnoreCase))
             {
-                WarpSessionLog.Step("poll", "failed status", new Dictionary<string, object?> { ["i"] = i, ["status"] = parsed });
+                WarpSessionLog.Decision("reject", "warp status Failed",
+                    new Dictionary<string, object?> { ["i"] = i, ["status"] = parsed });
                 return false;
             }
             if (i >= 3 && (parsed.Contains("Disconnected", StringComparison.OrdinalIgnoreCase) ||
                            parsed.Contains("Not connected", StringComparison.OrdinalIgnoreCase)))
             {
-                WarpSessionLog.Step("poll", "disconnected early", new Dictionary<string, object?> { ["i"] = i, ["status"] = parsed });
+                WarpSessionLog.Decision("reject", "disconnected during poll",
+                    new Dictionary<string, object?> { ["i"] = i, ["status"] = parsed });
                 return false;
             }
 
@@ -1057,26 +1159,29 @@ public static class WarpCli
                 return true;
             }
 
-            PublicIpInfo info = await FetchPublicIpInfoAsync(4000).ConfigureAwait(false);
+            PublicIpInfo info = await FetchPublicIpInfoAsync(5000).ConfigureAwait(false);
+            WarpSessionLog.Egress(info.Source ?? "trace", info, new Dictionary<string, object?> { ["i"] = i, ["status"] = parsed });
             if (info.WarpOn == true)
             {
                 WarpSessionLog.Step("poll", "connected warp=on",
-                    new Dictionary<string, object?> { ["i"] = i, ["ip"] = info.Ip, ["loc"] = info.Loc });
+                    new Dictionary<string, object?> { ["i"] = i, ["ip"] = info.Ip, ["loc"] = info.Loc, ["colo"] = info.Colo });
                 return true;
             }
             if (info.WarpOn == false)
                 progress?.Report("warp-cli says Connected but trace shows warp=off — waiting…");
-            else if (i >= 6)
-            {
-                WarpSessionLog.Step("poll", "connected warp=unknown accepted",
-                    new Dictionary<string, object?> { ["i"] = i, ["ip"] = info.Ip });
-                return true;
-            }
+            else
+                progress?.Report("Connected status but could not confirm warp=on yet…");
         }
-        bool final = IsConnected(Status());
-        WarpSessionLog.Step("poll", final ? "timeout but still Connected" : "timeout not connected",
-            new Dictionary<string, object?> { ["status"] = ParseStatus(Status()) });
-        return final;
+        // Never treat bare "Connected" as success when warp=on was required.
+        Result finalSt = Status();
+        WarpSessionLog.Step("poll", "timeout without warp=on",
+            new Dictionary<string, object?>
+            {
+                ["status"] = ParseStatus(finalSt),
+                ["statusRaw"] = TruncateForLog(finalSt.Combined, 400),
+                ["verifyWarpOn"] = verifyWarpOn,
+            });
+        return false;
     }
 
     public sealed class PublicIpInfo
@@ -1084,44 +1189,97 @@ public static class WarpCli
         public string? Ip { get; init; }
         public bool? WarpOn { get; init; }
         public string? Loc { get; init; }
+        public string? Colo { get; init; }
+        public string? Gateway { get; init; }
+        public string? Http { get; init; }
+        /// <summary>Which URL produced this result (or failure reason).</summary>
+        public string? Source { get; init; }
+        public string? Error { get; init; }
     }
 
     public static async Task<PublicIpInfo> FetchPublicIpInfoAsync(int timeoutMs = 8000)
     {
-        try
+        // Prefer endpoints that reliably include warp=/loc=/colo= under tunnel.
+        string[] urls =
         {
-            using CancellationTokenSource cts = new(timeoutMs);
-            string body = await SharedHttp.GetStringAsync("https://cloudflare.com/cdn-cgi/trace", cts.Token).ConfigureAwait(false);
-            string? ip = null;
-            bool? warp = null;
-            string? loc = null;
-            foreach (string line in body.Split('\n'))
+            "https://cloudflare.com/cdn-cgi/trace",
+            "https://www.cloudflare.com/cdn-cgi/trace",
+            "https://1.1.1.1/cdn-cgi/trace",
+        };
+
+        string? lastErr = null;
+        foreach (string url in urls)
+        {
+            try
             {
-                if (line.StartsWith("ip=", StringComparison.OrdinalIgnoreCase))
-                    ip = line[3..].Trim();
-                else if (line.StartsWith("warp=", StringComparison.OrdinalIgnoreCase))
-                    warp = line[5..].Trim().Equals("on", StringComparison.OrdinalIgnoreCase);
-                else if (line.StartsWith("loc=", StringComparison.OrdinalIgnoreCase))
-                    loc = line[4..].Trim();
+                using CancellationTokenSource cts = new(timeoutMs);
+                string body = await SharedHttp.GetStringAsync(url, cts.Token).ConfigureAwait(false);
+                var parsed = ParseCfTrace(body, url);
+                if (!string.IsNullOrEmpty(parsed.Ip) || parsed.WarpOn != null)
+                    return parsed;
+                lastErr = "trace missing ip/warp";
             }
-            if (!string.IsNullOrEmpty(ip))
-                return new PublicIpInfo { Ip = ip, WarpOn = warp, Loc = loc };
+            catch (Exception ex)
+            {
+                lastErr = ex.Message;
+                Debug.WriteLine("FetchPublicIpInfoAsync " + url + ": " + ex.Message);
+            }
         }
-        catch (Exception ex)
-        {
-            Debug.WriteLine("FetchPublicIpInfoAsync cf: " + ex.Message);
-        }
+
+        // ipify is IP-only — never treat as warp confirmation.
         try
         {
-            using CancellationTokenSource cts = new(timeoutMs);
+            using CancellationTokenSource cts = new(Math.Min(timeoutMs, 5000));
             string ip = (await SharedHttp.GetStringAsync("https://api.ipify.org", cts.Token).ConfigureAwait(false)).Trim();
-            return new PublicIpInfo { Ip = ip, WarpOn = null, Loc = null };
+            return new PublicIpInfo
+            {
+                Ip = ip,
+                WarpOn = null,
+                Source = "ipify",
+                Error = "ip-only fallback; warp unknown (" + (lastErr ?? "cf-trace failed") + ")",
+            };
         }
         catch (Exception ex)
         {
             Debug.WriteLine("FetchPublicIpInfoAsync ipify: " + ex.Message);
-            return new PublicIpInfo();
+            return new PublicIpInfo { Error = lastErr ?? ex.Message, Source = "none" };
         }
+    }
+
+    private static PublicIpInfo ParseCfTrace(string body, string source)
+    {
+        string? ip = null;
+        bool? warp = null;
+        string? loc = null;
+        string? colo = null;
+        string? gateway = null;
+        string? http = null;
+        foreach (string raw in body.Split('\n'))
+        {
+            string line = raw.Trim();
+            if (line.StartsWith("ip=", StringComparison.OrdinalIgnoreCase))
+                ip = line[3..].Trim();
+            else if (line.StartsWith("warp=", StringComparison.OrdinalIgnoreCase))
+                warp = line[5..].Trim().Equals("on", StringComparison.OrdinalIgnoreCase);
+            else if (line.StartsWith("loc=", StringComparison.OrdinalIgnoreCase))
+                loc = line[4..].Trim();
+            else if (line.StartsWith("colo=", StringComparison.OrdinalIgnoreCase))
+                colo = line[5..].Trim();
+            else if (line.StartsWith("gateway=", StringComparison.OrdinalIgnoreCase))
+                gateway = line[8..].Trim();
+            else if (line.StartsWith("http=", StringComparison.OrdinalIgnoreCase))
+                http = line[5..].Trim();
+        }
+        return new PublicIpInfo
+        {
+            Ip = ip,
+            WarpOn = warp,
+            Loc = loc,
+            Colo = colo,
+            Gateway = gateway,
+            Http = http,
+            Source = source,
+        };
     }
 
     public static async Task<string?> FetchPublicIpAsync(int timeoutMs = 8000)
@@ -1201,5 +1359,84 @@ public static class WarpCli
         if (string.IsNullOrEmpty(a)) return "\"\"";
         if (a.Contains(' ') || a.Contains('"')) return "\"" + a.Replace("\"", "\\\"") + "\"";
         return a;
+    }
+
+    private static string TruncateForLog(string? s, int max)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        s = s.Replace("\r", " ").Replace("\n", " | ");
+        return s.Length <= max ? s : s[..max] + "…";
+    }
+
+    /// <summary>High-signal warp-cli / host snapshot once per connect session.</summary>
+    private static void LogEnvironmentSnapshot()
+    {
+        try
+        {
+            string? exe = FindExecutable();
+            Result ver = Run("--version");
+            Result st = Status();
+            Result settings = Run("settings", "list");
+            Result mode = Run("mode");
+            Result proto = Run("tunnel", "protocol");
+            Result ep = Run("tunnel", "endpoint");
+            Result reg = Run("registration", "show");
+
+            // Registration: keep account type / device id only — never license keys.
+            string regSafe = "";
+            foreach (string line in reg.Combined.Split('\n'))
+            {
+                string t = line.Trim();
+                if (t.StartsWith("Account type", StringComparison.OrdinalIgnoreCase) ||
+                    t.StartsWith("Device ID", StringComparison.OrdinalIgnoreCase) ||
+                    t.StartsWith("Device name", StringComparison.OrdinalIgnoreCase) ||
+                    t.Contains("account_type", StringComparison.OrdinalIgnoreCase) ||
+                    t.Contains("device_id", StringComparison.OrdinalIgnoreCase))
+                {
+                    regSafe += t + " | ";
+                }
+            }
+
+            string settingsSafe = TruncateForLog(settings.Combined, 900);
+            // Drop lines that look like secrets if any appear.
+            if (settingsSafe.Contains("key", StringComparison.OrdinalIgnoreCase) ||
+                settingsSafe.Contains("token", StringComparison.OrdinalIgnoreCase) ||
+                settingsSafe.Contains("license", StringComparison.OrdinalIgnoreCase))
+            {
+                var keep = new List<string>();
+                foreach (string line in settings.Combined.Split('\n'))
+                {
+                    string t = line.Trim();
+                    if (t.Length == 0) continue;
+                    if (t.Contains("key", StringComparison.OrdinalIgnoreCase) ||
+                        t.Contains("token", StringComparison.OrdinalIgnoreCase) ||
+                        t.Contains("license", StringComparison.OrdinalIgnoreCase) ||
+                        t.Contains("secret", StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    keep.Add(t);
+                    if (keep.Count >= 40) break;
+                }
+                settingsSafe = string.Join(" | ", keep);
+            }
+
+            WarpSessionLog.Env(new Dictionary<string, object?>
+            {
+                ["warpCli"] = exe,
+                ["version"] = TruncateForLog(ver.Combined, 120),
+                ["serviceRunning"] = IsServiceRunning(),
+                ["status"] = ParseStatus(st),
+                ["statusRaw"] = TruncateForLog(st.Combined, 300),
+                ["mode"] = TruncateForLog(mode.Combined, 120),
+                ["protocol"] = TruncateForLog(proto.Combined, 120),
+                ["endpoint"] = TruncateForLog(ep.Combined, 160),
+                ["registration"] = TruncateForLog(regSafe, 240),
+                ["settings"] = settingsSafe,
+                ["dpiActive"] = WarpDpiAssist.IsActive,
+            });
+        }
+        catch (Exception ex)
+        {
+            WarpSessionLog.Env(new Dictionary<string, object?> { ["error"] = ex.Message });
+        }
     }
 }

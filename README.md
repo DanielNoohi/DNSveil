@@ -2,7 +2,7 @@
 
 Fork of [msasanmh/DNSveil](https://github.com/msasanmh/DNSveil) (formerly Secure DNS Client) with **GeoHide WARP**, Smart DNS rule presets, and related fixes.
 
-**Current release:** [v3.5.6](https://github.com/DanielNoohi/DNSveil/releases/tag/v3.5.6)
+**Current release:** [v3.5.7](https://github.com/DanielNoohi/DNSveil/releases/tag/v3.5.7)
 
 ![GitHub](https://img.shields.io/github/license/DanielNoohi/DNSveil)
 ![GitHub release](https://img.shields.io/github/v/release/DanielNoohi/DNSveil)
@@ -35,6 +35,11 @@ Then install [ASP.NET Core Runtime x86 v6.0.36](https://dotnet.microsoft.com/en-
 [This fork â€” latest release](https://github.com/DanielNoohi/DNSveil/releases/latest) Â· [Upstream releases](https://github.com/msasanmh/DNSveil/releases/latest)
 
 ---
+
+### What's new in this fork (v3.5.7)
+* **One Connect button:** Auto-find merged into Connect (censorship scan when enabled; Endpoint box when you pick a specific host).
+* **No false Connected:** success requires Cloudflare trace `warp=on` (status alone is not enough).
+* **Richer GeoHide logs:** `env` / `decision` / `egress` / `attempt_result` / `status_change` in `UserData/GeoHideLogs/` for agent debugging.
 
 ### What's new in this fork (v3.5.6)
 * **Gaming connect fix:** low-latency no longer re-applies `tunnel_only` after a proven connect (that was dropping MASQUE). Post-connect steps verify `Connected` + `warp=on` and restore the proven endpoint if needed.

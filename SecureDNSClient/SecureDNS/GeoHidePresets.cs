@@ -163,7 +163,7 @@ public static class GeoHidePresets
     public static string HelpSummary =>
         "DNS alone does not hide your IP from websites or apps.\n\n" +
         "• Tools → GeoHide WARP: controls official warp-cli (like PyWarp).\n" +
-        "• Iran / heavy DPI: enable Censorship mode + DPI assist, protocol MASQUE, then Auto-find.\n" +
+        "• Iran / heavy DPI: enable Censorship mode + DPI assist, protocol MASQUE, then Connect.\n" +
         "  – DPI assist = GoodbyeDPI TLS ClientHello fragment (GFW-knocker style).\n" +
         "  – Scans IRCF endpoints + Cloudflare WARP CIDRs over TCP (not ICMP).\n" +
         "  – MASQUE with HTTP/2 fallback when QUIC is blocked.\n" +

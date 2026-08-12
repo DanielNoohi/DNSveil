@@ -26,7 +26,6 @@ public class FormGeoHideWarp : Form
     private readonly CustomButton _btnRefresh = new();
     private readonly CustomButton _btnConnect = new();
     private readonly CustomButton _btnDisconnect = new();
-    private readonly CustomButton _btnAuto = new();
     private readonly CustomButton _btnCancel = new();
     private readonly CustomButton _btnInstall = new();
     private readonly CustomButton _btnImportPreset = new();
@@ -60,7 +59,7 @@ public class FormGeoHideWarp : Form
         _lblHelp.AutoSize = false;
         _lblHelp.Location = new Point(12, 10);
         _lblHelp.Size = new Size(616, 40);
-        _lblHelp.Text = "Uses official Cloudflare WARP (warp-cli). Under Iranian DPI: enable Censorship mode + DPI assist (TLS fragment), then Auto-find. Destinations see a Cloudflare exit IP — not your ISP.";
+        _lblHelp.Text = "Uses official Cloudflare WARP (warp-cli). Under Iranian DPI: enable Censorship + DPI assist, then Connect (scans IRCF/CF and connects). Destinations see a Cloudflare exit IP — not your ISP.";
 
         _lblStatus.AutoSize = true;
         _lblStatus.Location = new Point(12, 56);
@@ -95,17 +94,15 @@ public class FormGeoHideWarp : Form
         };
         _cmbProtocol.SelectedIndex = 0; // MASQUE first under censorship
 
-        StyleBtn(_btnConnect, "Connect", new Point(12, 126), 90);
-        StyleBtn(_btnDisconnect, "Disconnect", new Point(108, 126), 90);
-        StyleBtn(_btnAuto, "Auto-find", new Point(204, 126), 90);
-        StyleBtn(_btnCancel, "Cancel", new Point(300, 126), 70);
-        StyleBtn(_btnMinimize, "Minimize", new Point(376, 126), 80);
-        StyleBtn(_btnInstall, "Get WARP…", new Point(462, 126), 90);
-        StyleBtn(_btnHelp, "Help", new Point(558, 126), 64);
+        StyleBtn(_btnConnect, "Connect", new Point(12, 126), 110);
+        StyleBtn(_btnDisconnect, "Disconnect", new Point(128, 126), 90);
+        StyleBtn(_btnCancel, "Cancel", new Point(224, 126), 70);
+        StyleBtn(_btnMinimize, "Minimize", new Point(300, 126), 80);
+        StyleBtn(_btnInstall, "Get WARP…", new Point(386, 126), 100);
+        StyleBtn(_btnHelp, "Help", new Point(492, 126), 64);
         _btnCancel.Enabled = false;
-        _btnConnect.Click += async (_, _) => await ConnectAsync(auto: false);
+        _btnConnect.Click += async (_, _) => await ConnectAsync();
         _btnDisconnect.Click += async (_, _) => await DisconnectAsync();
-        _btnAuto.Click += async (_, _) => await ConnectAsync(auto: true);
         _btnCancel.Click += (_, _) => { try { _cts?.Cancel(); } catch { } };
         _btnMinimize.Click += (_, _) => { WindowState = FormWindowState.Minimized; };
         _btnInstall.Click += (_, _) => OpenLinks.OpenUrl("https://one.one.one.one/");
@@ -177,7 +174,7 @@ public class FormGeoHideWarp : Form
         {
             _lblHelp, _lblStatus, _lblIp, _btnRefresh,
             _lblEp, _cmbEndpoint, _lblProto, _cmbProtocol,
-            _btnConnect, _btnDisconnect, _btnAuto, _btnCancel, _btnMinimize, _btnInstall, _btnHelp,
+            _btnConnect, _btnDisconnect, _btnCancel, _btnMinimize, _btnInstall, _btnHelp,
             _chkCensorship, _chkDpiAssist, _chkLowLatency,
             _lblPreset, _cmbPreset, _btnImportPreset, _chkImportAfterConnect,
             _log, _lblFoot
@@ -255,7 +252,7 @@ public class FormGeoHideWarp : Form
         {
             CustomMessageBox.Show(this,
                 "Another VPN/tunnel appears active (" + report.OtherVpnHint + ").\n\n" +
-                "Disconnect it before GeoHide Auto-find, or WARP will fight it (slow/fail/high latency).",
+                "Disconnect it before GeoHide Connect, or WARP will fight it (slow/fail/high latency).",
                 "VPN conflict", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
@@ -329,7 +326,6 @@ public class FormGeoHideWarp : Form
         _busy = busy;
         _btnConnect.Enabled = !busy;
         _btnDisconnect.Enabled = !busy;
-        _btnAuto.Enabled = !busy;
         _btnRefresh.Enabled = !busy;
         _btnImportPreset.Enabled = !busy;
         _btnCancel.Enabled = busy;
@@ -359,7 +355,8 @@ public class FormGeoHideWarp : Form
         string ipPart = info.Ip ?? "unavailable";
         string warpPart = info.WarpOn == true ? " (warp=on)" : info.WarpOn == false ? " (warp=off)" : "";
         string locPart = string.IsNullOrEmpty(info.Loc) ? "" : $" [{info.Loc}]";
-        _lblIp.Text = "Public IP: " + ipPart + warpPart + locPart;
+        string coloPart = string.IsNullOrEmpty(info.Colo) ? "" : $" colo={info.Colo}";
+        _lblIp.Text = "Public IP: " + ipPart + warpPart + locPart + coloPart;
     }
 
     private async Task DisconnectAsync()
@@ -375,7 +372,7 @@ public class FormGeoHideWarp : Form
         finally { SetBusy(false); }
     }
 
-    private async Task ConnectAsync(bool auto)
+    private async Task ConnectAsync()
     {
         if (_busy) return;
         if (!WarpCli.IsInstalled())
@@ -421,26 +418,27 @@ public class FormGeoHideWarp : Form
             if (pre.AlreadyOnWarp)
                 Log("Already on WARP — will disconnect and reconnect with GeoHide settings.");
 
-            // Option conflict resolution for this attempt
-            bool censorship = _chkCensorship.Checked || auto;
+            bool censorship = _chkCensorship.Checked;
             bool dpi = _chkDpiAssist.Checked;
             bool lowLatency = _chkLowLatency.Checked;
 
-            // If user is in Iran, force censorship path for Auto-find
-            if (auto && pre.LikelyIran)
+            // Iran → force censorship path
+            if (pre.LikelyIran)
             {
                 censorship = true;
                 dpi = true;
             }
 
-            // Outside Iran + not censorship: skip heavy scan
             if (!censorship && !pre.LikelyIran)
                 Log("Fast path: censorship off.");
 
             SyncOptionConflicts(fromUser: false);
             string protocol = censorship ? "MASQUE" : (_cmbProtocol.SelectedItem?.ToString() ?? "MASQUE");
 
-            WarpSessionLog.BeginSession(auto ? "auto-find" : "connect",
+            string selected = _cmbEndpoint.Text.Trim();
+            bool hasSpecific = !string.IsNullOrEmpty(selected) && !selected.StartsWith("(");
+
+            WarpSessionLog.BeginSession("connect",
                 new Dictionary<string, object?>
                 {
                     ["censorship"] = censorship,
@@ -451,6 +449,7 @@ public class FormGeoHideWarp : Form
                     ["otherVpn"] = pre.OtherVpnLikely,
                     ["alreadyWarp"] = pre.AlreadyOnWarp,
                     ["protocol"] = protocol,
+                    ["endpoint"] = hasSpecific ? selected : "(scan/default)",
                 });
             Log("Session log → " + WarpSessionLog.CurrentLogPath);
 
@@ -459,7 +458,6 @@ public class FormGeoHideWarp : Form
                 Enabled = censorship,
                 DpiAssist = dpi,
                 LowLatency = lowLatency,
-                // WG upgrade under DPI rarely works and made Auto-find feel stuck — off by default
                 TryWireGuardUpgrade = false,
                 ApplyIranExcludes = lowLatency,
                 MaxCandidates = censorship ? 48 : 24,
@@ -468,29 +466,20 @@ public class FormGeoHideWarp : Form
                 ProbeTimeoutMs = 350,
             };
 
-            IEnumerable<string>? endpoints;
-            if (auto)
+            // One Connect path: censorship/empty → scan; otherwise use the Endpoint box.
+            List<string>? endpointList;
+            if (censorship || !hasSpecific)
             {
-                endpoints = null;
-                Log("Auto-find (fast): service OK → DPI → MASQUE IRCF/CF probe → connect…");
+                endpointList = null;
+                Log(censorship
+                    ? "Connect: scan IRCF/CF → probe → connect (requires warp=on)…"
+                    : "Connecting with Cloudflare default…");
             }
             else
             {
-                string selected = _cmbEndpoint.Text.Trim();
-                if (string.IsNullOrEmpty(selected) || selected.StartsWith("("))
-                {
-                    endpoints = censorship ? null : new List<string>();
-                    Log(censorship ? "Connect (censorship scan)…" : "Connecting with Cloudflare default…");
-                }
-                else
-                {
-                    endpoints = new[] { selected };
-                }
+                endpointList = new List<string> { selected };
+                Log($"Connecting {selected}…");
             }
-
-            List<string>? endpointList = endpoints?.ToList();
-            if (censorship && (endpointList == null || endpointList.Count == 0))
-                endpointList = null;
 
             var (ok, message, ep, usedProtocol) = await WarpCli.TryConnectWithFallbackAsync(
                 endpointList, protocol, progress, _cts.Token, opt).ConfigureAwait(true);
