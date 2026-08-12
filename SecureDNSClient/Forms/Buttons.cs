@@ -682,76 +682,10 @@ public partial class FormMain
     }
 
     // Settings -> Rules
-    private async void CustomButtonSettingRules_Click(object sender, EventArgs e)
+    private void CustomButtonSettingRules_Click(object sender, EventArgs e)
     {
         if (IsExiting) return;
-
         GeoHidePresets.EnsureUserPresetsCopied();
-
-        string prompt =
-            "Rules options:\n\n" +
-            "Yes = Edit Rules.txt in Notepad\n" +
-            "No = Import GeoHide preset (Shecan / upstream proxy)\n" +
-            "Cancel = Show GeoHide help\n\n" +
-            "Note: Smart DNS alone only helps for domains those providers cover. Use Tools → GeoHide WARP to change your public IP.";
-
-        DialogResult dr = CustomMessageBox.Show(this, prompt, "Rules / GeoHide",
-            MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
-
-        if (dr == DialogResult.Cancel)
-        {
-            CustomMessageBox.Show(this, GeoHidePresets.HelpSummary, "GeoHide help",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
-            string readme = Path.Combine(GeoHidePresets.UserPresetsDir, "README_GeoHide.md");
-            if (!File.Exists(readme))
-                readme = Path.Combine(GeoHidePresets.BundledPresetsDir, "README_GeoHide.md");
-            if (!File.Exists(readme))
-                readme = Path.Combine(GeoHidePresets.RepoPresetsDir, "README_GeoHide.md");
-            if (File.Exists(readme))
-                ProcessManager.ExecuteOnly("notepad", null, readme, false, false, SecureDNS.CurrentPath);
-            return;
-        }
-
-        if (dr == DialogResult.No)
-        {
-            string which =
-                "Import which preset?\n\n" +
-                "Yes = Anti-Sanction (Shecan) for websites\n" +
-                "No = Via upstream proxy (edit GeoHideProxy=)\n" +
-                "Cancel = abort";
-
-            DialogResult pick = CustomMessageBox.Show(this, which, "Import GeoHide preset",
-                MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
-            if (pick == DialogResult.Cancel) return;
-
-            GeoHidePresets.PresetKind kind = pick == DialogResult.Yes
-                ? GeoHidePresets.PresetKind.AntiSanctionShecanShelter
-                : GeoHidePresets.PresetKind.ViaUpstreamProxy;
-
-            bool merge = true;
-            if (File.Exists(SecureDNS.RulesPath))
-            {
-                DialogResult mergeDr = CustomMessageBox.Show(this,
-                    "Merge into existing Rules.txt?\n\nYes = merge\nNo = replace file",
-                    "Merge rules?", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
-                if (mergeDr == DialogResult.Cancel) return;
-                merge = mergeDr == DialogResult.Yes;
-            }
-
-            var (ok, message) = await GeoHidePresets.ImportIntoRulesAsync(kind, merge);
-            this.InvokeIt(() => CustomRichTextBoxLog.AppendText(message + NL, ok ? Color.MediumSeaGreen : Color.IndianRed));
-            CustomMessageBox.Show(this, message, ok ? "Imported" : "Import failed",
-                MessageBoxButtons.OK, ok ? MessageBoxIcon.Information : MessageBoxIcon.Error);
-
-            if (ok)
-            {
-                this.InvokeIt(() => CustomCheckBoxSettingEnableRules.Checked = true);
-                FileDirectory.CreateEmptyFile(SecureDNS.RulesPath);
-                ProcessManager.ExecuteOnly("notepad", null, SecureDNS.RulesPath, false, false, SecureDNS.CurrentPath);
-            }
-            return;
-        }
-
         FileDirectory.CreateEmptyFile(SecureDNS.RulesPath);
         int notepad = ProcessManager.ExecuteOnly("notepad", null, SecureDNS.RulesPath, false, false, SecureDNS.CurrentPath);
         if (notepad == -1)

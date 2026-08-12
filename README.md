@@ -39,7 +39,7 @@ Then install [ASP.NET Core Runtime x86 v6.0.36](https://dotnet.microsoft.com/en-
 ### What's new in this fork (v3.4.0)
 * **Tools → GeoHide WARP** — drive official Cloudflare WARP from the app (PyWarp-style `warp-cli`: endpoints, WireGuard/MASQUE, auto-find).
 * **Rules presets** in `Assets/Presets/` — Shecan anti-sanction, gaming Smart DNS template, upstream-proxy template.
-* **Safer defaults** — update check without `AllowInsecure`; TLS validation honors `AllowInsecure`; DNS upstream equal to local server fails closed.
+* **Safer defaults** — update check without `AllowInsecure`; TLS validation honors `AllowInsecure` but still allows Fake-SNI name mismatches; DNS upstream equal to local server fails closed.
 * README clarifies that encrypted DNS alone does not change your public IP.
 
 ---

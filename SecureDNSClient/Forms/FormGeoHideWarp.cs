@@ -20,6 +20,7 @@ public class FormGeoHideWarp : Form
     private readonly CustomButton _btnConnect = new();
     private readonly CustomButton _btnDisconnect = new();
     private readonly CustomButton _btnAuto = new();
+    private readonly CustomButton _btnCancel = new();
     private readonly CustomButton _btnInstall = new();
     private readonly CustomButton _btnShecan = new();
     private readonly CustomRichTextBox _log = new();
@@ -31,7 +32,7 @@ public class FormGeoHideWarp : Form
     {
         Text = "GeoHide — Cloudflare WARP";
         Width = 640;
-        Height = 520;
+        Height = 540;
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -81,15 +82,13 @@ public class FormGeoHideWarp : Form
         var lblEp = new CustomLabel { Text = "Endpoint", AutoSize = true, Margin = new Padding(0, 8, 8, 0) };
         _cmbEndpoint.Size = new Size(280, 28);
         _cmbEndpoint.DropDownStyle = ComboBoxStyle.DropDown;
-        foreach (string ep in WarpCli.EnumerateEndpointCandidates("WireGuard", 40))
-            _cmbEndpoint.Items.Add(ep);
-        _cmbEndpoint.Items.Insert(0, "(Cloudflare default)");
-        _cmbEndpoint.SelectedIndex = 0;
         var lblProto = new CustomLabel { Text = "Protocol", AutoSize = true, Margin = new Padding(12, 8, 8, 0) };
         _cmbProtocol.Size = new Size(120, 28);
         _cmbProtocol.DropDownStyle = ComboBoxStyle.DropDownList;
         _cmbProtocol.Items.AddRange(new object[] { "WireGuard", "MASQUE" });
         _cmbProtocol.SelectedIndex = 0;
+        _cmbProtocol.SelectedIndexChanged += (_, _) => ReloadEndpointList();
+        ReloadEndpointList();
         rowEp.Controls.Add(lblEp);
         rowEp.Controls.Add(_cmbEndpoint);
         rowEp.Controls.Add(lblProto);
@@ -100,19 +99,23 @@ public class FormGeoHideWarp : Form
         StyleBtn(_btnConnect, "Connect", 100);
         StyleBtn(_btnDisconnect, "Disconnect", 100);
         StyleBtn(_btnAuto, "Auto-find endpoint", 140);
+        StyleBtn(_btnCancel, "Cancel", 80);
         StyleBtn(_btnInstall, "Get WARP…", 100);
         StyleBtn(_btnShecan, "Import Shecan rules", 150);
+        _btnCancel.Enabled = false;
         _btnConnect.Click += async (_, _) => await ConnectAsync(auto: false);
         _btnDisconnect.Click += async (_, _) => await DisconnectAsync();
         _btnAuto.Click += async (_, _) => await ConnectAsync(auto: true);
+        _btnCancel.Click += (_, _) => { try { _cts?.Cancel(); } catch { } };
         _btnInstall.Click += (_, _) => OpenLinks.OpenUrl("https://one.one.one.one/");
         _btnShecan.Click += async (_, _) => await ImportShecanAsync();
         _chkShecan.Text = "Also enable Shecan anti-sanction rules after connect";
         _chkShecan.AutoSize = true;
-        _chkShecan.Checked = true;
+        _chkShecan.Checked = false; // off by default — avoids fighting WARP/Cloudflare DNS
         rowBtn.Controls.Add(_btnConnect);
         rowBtn.Controls.Add(_btnDisconnect);
         rowBtn.Controls.Add(_btnAuto);
+        rowBtn.Controls.Add(_btnCancel);
         rowBtn.Controls.Add(_btnInstall);
         rowBtn.Controls.Add(_btnShecan);
         rowBtn.Controls.Add(_chkShecan);
@@ -137,7 +140,26 @@ public class FormGeoHideWarp : Form
                 : "warp-cli NOT found — click Get WARP… and install Cloudflare WARP.");
             await RefreshStatusAsync();
         };
-        FormClosing += (_, _) => { try { _cts?.Cancel(); } catch { } };
+        FormClosing += (_, _) =>
+        {
+            try { _cts?.Cancel(); } catch { }
+            try { _cts?.Dispose(); } catch { }
+            _cts = null;
+        };
+    }
+
+    private void ReloadEndpointList()
+    {
+        string protocol = _cmbProtocol.SelectedItem?.ToString() ?? "WireGuard";
+        string keep = _cmbEndpoint.Text;
+        _cmbEndpoint.Items.Clear();
+        _cmbEndpoint.Items.Add("(Cloudflare default)");
+        foreach (string ep in WarpCli.EnumerateEndpointCandidates(protocol, 40))
+            _cmbEndpoint.Items.Add(ep);
+        if (!string.IsNullOrWhiteSpace(keep) && _cmbEndpoint.Items.Contains(keep))
+            _cmbEndpoint.Text = keep;
+        else
+            _cmbEndpoint.SelectedIndex = 0;
     }
 
     private static void StyleBtn(CustomButton b, string text, int width)
@@ -154,6 +176,11 @@ public class FormGeoHideWarp : Form
     {
         try
         {
+            if (InvokeRequired)
+            {
+                BeginInvoke(() => Log(msg));
+                return;
+            }
             _log.AppendText($"{DateTime.Now:HH:mm:ss} {msg}{Environment.NewLine}");
         }
         catch { }
@@ -167,6 +194,9 @@ public class FormGeoHideWarp : Form
         _btnAuto.Enabled = !busy;
         _btnRefresh.Enabled = !busy;
         _btnShecan.Enabled = !busy;
+        _btnCancel.Enabled = busy;
+        _cmbEndpoint.Enabled = !busy;
+        _cmbProtocol.Enabled = !busy;
     }
 
     private async Task RefreshStatusAsync()
@@ -179,8 +209,11 @@ public class FormGeoHideWarp : Form
         }
         var st = await Task.Run(() => WarpCli.Status()).ConfigureAwait(true);
         _lblStatus.Text = "Status: " + WarpCli.ParseStatus(st);
-        string? ip = await WarpCli.FetchPublicIpAsync().ConfigureAwait(true);
-        _lblIp.Text = "Public IP: " + (ip ?? "unavailable");
+        var info = await WarpCli.FetchPublicIpInfoAsync().ConfigureAwait(true);
+        string ipPart = info.Ip ?? "unavailable";
+        string warpPart = info.WarpOn == true ? " (warp=on)" : info.WarpOn == false ? " (warp=off)" : "";
+        string locPart = string.IsNullOrEmpty(info.Loc) ? "" : $" [{info.Loc}]";
+        _lblIp.Text = "Public IP: " + ipPart + warpPart + locPart;
     }
 
     private async Task DisconnectAsync()
@@ -209,12 +242,13 @@ public class FormGeoHideWarp : Form
         }
 
         SetBusy(true);
+        _cts?.Dispose();
         _cts = new CancellationTokenSource();
         var progress = new Progress<string>(Log);
         try
         {
             string protocol = _cmbProtocol.SelectedItem?.ToString() ?? "WireGuard";
-            IEnumerable<string> endpoints;
+            IEnumerable<string>? endpoints;
             if (auto)
             {
                 endpoints = WarpCli.EnumerateEndpointCandidates(protocol, 24);
@@ -225,34 +259,13 @@ public class FormGeoHideWarp : Form
                 string selected = _cmbEndpoint.Text.Trim();
                 if (string.IsNullOrEmpty(selected) || selected.StartsWith("("))
                 {
+                    endpoints = null; // default endpoint path inside WarpCli
                     Log("Connecting with Cloudflare default endpoint…");
-                    await Task.Run(() =>
-                    {
-                        WarpCli.AcceptTos();
-                        WarpCli.Disconnect();
-                        WarpCli.ResetEndpoint();
-                        WarpCli.SetModeWarp();
-                        WarpCli.SetProtocol(protocol);
-                        if (protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
-                            WarpCli.SetMasqueOptions("h3-with-h2-fallback");
-                        WarpCli.Connect();
-                    }).ConfigureAwait(true);
-                    await Task.Delay(2500).ConfigureAwait(true);
-                    await RefreshStatusAsync().ConfigureAwait(true);
-                    var st = await Task.Run(() => WarpCli.Status()).ConfigureAwait(true);
-                    if (WarpCli.IsConnected(st))
-                    {
-                        Log("Connected.");
-                        if (_chkShecan.Checked) await ImportShecanAsync(silent: true).ConfigureAwait(true);
-                        CustomMessageBox.Show(this,
-                            "WARP connected.\nDestinations should see a Cloudflare IP, not your ISP.\nKeep this connected while you need GeoHide.",
-                            "GeoHide", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    }
-                    else
-                        Log("Not connected: " + WarpCli.ParseStatus(st));
-                    return;
                 }
-                endpoints = new[] { selected };
+                else
+                {
+                    endpoints = new[] { selected };
+                }
             }
 
             var (ok, message, ep) = await WarpCli.TryConnectWithFallbackAsync(
@@ -280,6 +293,7 @@ public class FormGeoHideWarp : Form
         catch (OperationCanceledException)
         {
             Log("Cancelled.");
+            try { await Task.Run(() => WarpCli.Disconnect()).ConfigureAwait(true); } catch { }
         }
         catch (Exception ex)
         {

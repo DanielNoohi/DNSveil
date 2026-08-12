@@ -13,7 +13,8 @@ public static class GeoHidePresets
     public enum PresetKind
     {
         AntiSanctionShecanShelter,
-        ViaUpstreamProxy
+        ViaUpstreamProxy,
+        GamingSmartDns
     }
 
     public static string BundledPresetsDir =>
@@ -29,7 +30,16 @@ public static class GeoHidePresets
     {
         PresetKind.AntiSanctionShecanShelter => "Rules_ShecanShelter_AntiSanction.txt",
         PresetKind.ViaUpstreamProxy => "Rules_ViaUpstreamProxy.txt",
+        PresetKind.GamingSmartDns => "Rules_GamingSmartDns_ShelterRadar.txt",
         _ => string.Empty
+    };
+
+    public static string GetMarker(PresetKind kind) => kind switch
+    {
+        PresetKind.AntiSanctionShecanShelter => "DNSveil GeoHide — Anti-sanction",
+        PresetKind.ViaUpstreamProxy => "DNSveil GeoHide — route selected hosts via UPSTREAM PROXY",
+        PresetKind.GamingSmartDns => "DNSveil GeoHide — Gaming Smart DNS",
+        _ => "DNSveil GeoHide"
     };
 
     public static string? ResolvePresetPath(PresetKind kind)
@@ -64,8 +74,11 @@ public static class GeoHidePresets
                 foreach (string file in Directory.GetFiles(srcDir))
                 {
                     string dest = Path.Combine(UserPresetsDir, Path.GetFileName(file));
-                    if (!File.Exists(dest))
-                        File.Copy(file, dest, overwrite: false);
+                    // Always refresh README*; copy rule presets only if missing so user edits survive.
+                    string name = Path.GetFileName(file);
+                    bool isReadme = name.StartsWith("README", StringComparison.OrdinalIgnoreCase);
+                    if (isReadme || !File.Exists(dest))
+                        File.Copy(file, dest, overwrite: isReadme);
                 }
             }
         }
@@ -84,6 +97,12 @@ public static class GeoHidePresets
             if (path == null || !File.Exists(path))
                 return (false, "Preset file not found. Place presets under Assets/Presets next to the app or in UserData/Assets/Presets.");
 
+            // Prefer bundled/repo copy over a stale UserData copy when importing known presets.
+            string bundled = Path.Combine(BundledPresetsDir, GetPresetFileName(kind));
+            string repo = Path.Combine(RepoPresetsDir, GetPresetFileName(kind));
+            if (File.Exists(bundled)) path = bundled;
+            else if (File.Exists(repo)) path = repo;
+
             List<string> presetLines = new();
             await presetLines.LoadFromFileAsync(path, true, true);
             if (presetLines.Count == 0)
@@ -95,14 +114,14 @@ public static class GeoHidePresets
             if (merge && File.Exists(SecureDNS.RulesPath))
                 await existing.LoadFromFileAsync(SecureDNS.RulesPath, true, true);
 
-            string marker = kind == PresetKind.AntiSanctionShecanShelter
-                ? "DNSveil GeoHide — Anti-sanction"
-                : "DNSveil GeoHide — route selected hosts via UPSTREAM PROXY";
-
+            string marker = GetMarker(kind);
+            // Drop previous import of the same preset (marker lines + exact preset lines).
             existing = existing.Where(l => !l.Contains(marker, StringComparison.OrdinalIgnoreCase)).ToList();
             HashSet<string> presetSet = new(presetLines, StringComparer.OrdinalIgnoreCase);
             if (merge)
                 existing = existing.Where(l => !presetSet.Contains(l)).ToList();
+            else
+                existing.Clear();
 
             List<string> output = new();
             if (merge && existing.Count > 0)
@@ -114,9 +133,20 @@ public static class GeoHidePresets
             output.AddRange(presetLines);
             await File.WriteAllLinesAsync(SecureDNS.RulesPath, output, new UTF8Encoding(false));
 
-            string tip = kind == PresetKind.ViaUpstreamProxy
-                ? " Edit GeoHideProxy= in Rules.txt to your foreign SOCKS/HTTP exit."
-                : " Smart DNS helps only for domains those providers proxy — use Tools → GeoHide WARP to change your public IP.";
+            // Keep UserData copy in sync with what we imported.
+            try
+            {
+                Directory.CreateDirectory(UserPresetsDir);
+                File.Copy(path, Path.Combine(UserPresetsDir, Path.GetFileName(path)), overwrite: true);
+            }
+            catch { /* ignore */ }
+
+            string tip = kind switch
+            {
+                PresetKind.ViaUpstreamProxy => " Edit GeoHideProxy= in Rules.txt to your foreign SOCKS/HTTP exit.",
+                PresetKind.GamingSmartDns => " Add game domains under GamingDns; titles not on the provider list need GeoHide WARP.",
+                _ => " Smart DNS helps only for domains those providers proxy — use Tools → GeoHide WARP to change your public IP."
+            };
 
             return (true, $"Imported {Path.GetFileName(path)} into Rules.txt.{tip}");
         }

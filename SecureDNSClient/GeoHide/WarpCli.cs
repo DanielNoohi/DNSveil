@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Http;
 using System.Text;
 
 namespace SecureDNSClient.GeoHide;
@@ -31,6 +32,14 @@ public static class WarpCli
 
     private static string? _cachedExe;
     private static DateTime _cachedExeAt = DateTime.MinValue;
+    private static readonly HttpClient SharedHttp = CreateHttpClient();
+
+    private static HttpClient CreateHttpClient()
+    {
+        HttpClient c = new() { Timeout = TimeSpan.FromSeconds(12) };
+        c.DefaultRequestHeaders.UserAgent.ParseAdd("DNSveil-GeoHide/3.4");
+        return c;
+    }
 
     public sealed class Result
     {
@@ -38,10 +47,11 @@ public static class WarpCli
         public string StdOut { get; init; } = "";
         public string StdErr { get; init; } = "";
         public bool Ok => ExitCode == 0;
+        public string Combined => (StdOut + "\n" + StdErr).Trim();
         public string ErrorLine =>
             string.IsNullOrWhiteSpace(StdErr)
-                ? StdOut.Split('\n').FirstOrDefault()?.Trim() ?? ""
-                : StdErr.Split('\n').FirstOrDefault()?.Trim() ?? "";
+                ? StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim() ?? ""
+                : StdErr.Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim() ?? "";
     }
 
     public static string? FindExecutable(bool forceRefresh = false)
@@ -65,6 +75,7 @@ public static class WarpCli
             {
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Cloudflare", "Cloudflare WARP", "warp-cli.exe"),
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Cloudflare", "Cloudflare WARP", "warp-cli.exe"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Cloudflare", "CloudflareOne", "warp-cli.exe"),
                 @"C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe",
             };
             foreach (string c in candidates)
@@ -108,14 +119,27 @@ public static class WarpCli
                 StandardErrorEncoding = Encoding.UTF8,
             };
             p.Start();
-            string stdout = p.StandardOutput.ReadToEnd();
-            string stderr = p.StandardError.ReadToEnd();
-            if (!p.WaitForExit(45_000))
+
+            // Read stdout/stderr in parallel to avoid classic pipe-buffer deadlock.
+            Task<string> outTask = p.StandardOutput.ReadToEndAsync();
+            Task<string> errTask = p.StandardError.ReadToEndAsync();
+            if (!Task.WaitAll(new Task[] { outTask, errTask }, 45_000))
             {
                 try { p.Kill(entireProcessTree: true); } catch { /* ignore */ }
                 return new Result { ExitCode = -1, StdErr = "warp-cli timed out" };
             }
-            return new Result { ExitCode = p.ExitCode, StdOut = stdout?.Trim() ?? "", StdErr = stderr?.Trim() ?? "" };
+            if (!p.WaitForExit(5_000))
+            {
+                try { p.Kill(entireProcessTree: true); } catch { /* ignore */ }
+                return new Result { ExitCode = -1, StdErr = "warp-cli timed out" };
+            }
+
+            return new Result
+            {
+                ExitCode = p.ExitCode,
+                StdOut = (outTask.Result ?? "").Trim(),
+                StdErr = (errTask.Result ?? "").Trim()
+            };
         }
         catch (Exception ex)
         {
@@ -134,13 +158,55 @@ public static class WarpCli
     public static Result SetEndpoint(string endpoint) => Run("tunnel", "endpoint", "set", endpoint);
     public static Result ResetEndpoint() => Run("tunnel", "endpoint", "reset");
 
+    /// <summary>True when a consumer WARP registration already exists.</summary>
+    public static bool HasRegistration()
+    {
+        // Prefer plain show; -j is not available on all builds.
+        Result show = Run("registration", "show");
+        if (IsRegistrationPresent(show)) return true;
+        Result showJson = Run("-j", "registration", "show");
+        return IsRegistrationPresent(showJson);
+    }
+
+    public static bool EnsureRegistration(IProgress<string>? progress = null)
+    {
+        if (HasRegistration()) return true;
+        progress?.Report("Creating WARP registration…");
+        Result reg = Register();
+        AcceptTos();
+        if (HasRegistration()) return true;
+        progress?.Report("Registration failed: " + reg.ErrorLine);
+        return false;
+    }
+
+    private static bool IsRegistrationPresent(Result r)
+    {
+        string t = r.Combined;
+        if (string.IsNullOrWhiteSpace(t)) return false;
+        // Missing registration typically errors; success prints account/device fields.
+        if (t.Contains("not registered", StringComparison.OrdinalIgnoreCase) ||
+            t.Contains("No registration", StringComparison.OrdinalIgnoreCase) ||
+            t.Contains("Missing registration", StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (t.Contains("Account type", StringComparison.OrdinalIgnoreCase) ||
+            t.Contains("Device ID", StringComparison.OrdinalIgnoreCase) ||
+            t.Contains("License", StringComparison.OrdinalIgnoreCase))
+            return true;
+        // Some builds print JSON with id / account_type
+        if (t.Contains("account_type", StringComparison.OrdinalIgnoreCase) ||
+            t.Contains("\"device_id\"", StringComparison.OrdinalIgnoreCase))
+            return true;
+        return false;
+    }
+
     public static string ParseStatus(Result r)
     {
-        string text = r.StdOut + "\n" + r.StdErr;
+        string text = r.Combined;
         foreach (string line in text.Split('\n'))
         {
             string s = line.Trim();
-            if (s.StartsWith("Status", StringComparison.OrdinalIgnoreCase))
+            if (s.StartsWith("Status update:", StringComparison.OrdinalIgnoreCase) ||
+                s.StartsWith("Status:", StringComparison.OrdinalIgnoreCase))
                 return s;
         }
         foreach (string line in text.Split('\n'))
@@ -156,13 +222,23 @@ public static class WarpCli
 
     public static bool IsConnected(Result status)
     {
-        string t = status.StdOut + "\n" + status.StdErr;
-        // Avoid treating "Connecting" as success
-        if (t.Contains("Connecting", StringComparison.OrdinalIgnoreCase) &&
-            !t.Contains("Status update: Connected", StringComparison.OrdinalIgnoreCase) &&
-            !t.Contains("Status: Connected", StringComparison.OrdinalIgnoreCase))
-            return false;
+        string t = status.Combined;
+        // Prefer explicit Status lines so "Connecting" is never treated as success.
+        foreach (string line in t.Split('\n'))
+        {
+            string s = line.Trim();
+            if (!s.StartsWith("Status", StringComparison.OrdinalIgnoreCase)) continue;
+            if (s.Contains("Connected", StringComparison.OrdinalIgnoreCase) &&
+                !s.Contains("Disconnected", StringComparison.OrdinalIgnoreCase) &&
+                !s.Contains("Connecting", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (s.Contains("Connecting", StringComparison.OrdinalIgnoreCase) ||
+                s.Contains("Disconnected", StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
 
+        if (t.Contains("Connecting", StringComparison.OrdinalIgnoreCase))
+            return false;
         if (t.Contains("Status update: Connected", StringComparison.OrdinalIgnoreCase) ||
             t.Contains("Status: Connected", StringComparison.OrdinalIgnoreCase))
             return true;
@@ -180,7 +256,6 @@ public static class WarpCli
         bool masque = protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase);
         int[] ports = masque ? MasquePorts : WireGuardPorts;
 
-        // Prefer hostname first, then a shuffled subset of IPs to avoid long scans
         var hosts = new List<string> { EngageHosts[0] };
         var ips = EngageHosts.Skip(1).ToList();
         Shuffle(ips);
@@ -198,7 +273,7 @@ public static class WarpCli
     }
 
     public static async Task<(bool Ok, string Message, string? Endpoint)> TryConnectWithFallbackAsync(
-        IEnumerable<string> endpoints,
+        IEnumerable<string>? endpoints,
         string preferredProtocol = "WireGuard",
         IProgress<string>? progress = null,
         CancellationToken ct = default)
@@ -209,92 +284,128 @@ public static class WarpCli
         AcceptTos();
         Disconnect();
 
-        var show = Run("-j", "registration", "show");
-        if (!show.Ok)
-        {
-            progress?.Report("Creating WARP registration…");
-            var reg = Register();
-            AcceptTos();
-            if (!reg.Ok && !Run("-j", "registration", "show").Ok)
-                return (false, "WARP registration failed: " + reg.ErrorLine, null);
-        }
+        if (!EnsureRegistration(progress))
+            return (false, "WARP registration failed. Open the official WARP app once, accept the ToS, then retry.", null);
 
         SetModeWarp();
         SetProtocol(preferredProtocol);
         if (preferredProtocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
             SetMasqueOptions("h3-with-h2-fallback");
 
-        foreach (string endpoint in endpoints)
+        List<string> list = endpoints?.Where(e => !string.IsNullOrWhiteSpace(e)).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
+                            ?? new List<string>();
+
+                // Empty list ⇒ Cloudflare default endpoint first, then MASQUE fallback.
+        if (list.Count == 0)
         {
-            ct.ThrowIfCancellationRequested();
-            progress?.Report($"Trying endpoint {endpoint} ({preferredProtocol})…");
-            Disconnect();
-            var setEp = SetEndpoint(endpoint);
-            if (!setEp.Ok)
+            progress?.Report($"Connecting with Cloudflare default endpoint ({preferredProtocol})…");
+            ResetEndpoint();
+            if (await PollConnectedAsync(ct).ConfigureAwait(false))
+                return (true, $"Connected via default endpoint ({preferredProtocol}).", null);
+            progress?.Report("Default endpoint failed: " + ParseStatus(Status()));
+        }
+        else
+        {
+            foreach (string endpoint in list)
             {
-                progress?.Report($"Skip {endpoint}: {setEp.ErrorLine}");
-                continue;
-            }
+                ct.ThrowIfCancellationRequested();
+                progress?.Report($"Trying endpoint {endpoint} ({preferredProtocol})…");
+                Disconnect();
+                Result setEp = SetEndpoint(endpoint);
+                if (!setEp.Ok)
+                {
+                    progress?.Report($"Skip {endpoint}: {setEp.ErrorLine}");
+                    continue;
+                }
 
-            Connect();
-            // Poll briefly — connection is often not instant
-            for (int i = 0; i < 6; i++)
-            {
-                await Task.Delay(800, ct).ConfigureAwait(false);
-                var st = Status();
-                if (IsConnected(st))
+                if (await PollConnectedAsync(ct).ConfigureAwait(false))
                     return (true, $"Connected via {endpoint} ({preferredProtocol}).", endpoint);
-                if (ParseStatus(st).Contains("Failed", StringComparison.OrdinalIgnoreCase))
-                    break;
-            }
 
-            progress?.Report($"No connect on {endpoint}: {ParseStatus(Status())}");
+                string reason = ParseStatus(Status());
+                progress?.Report($"No connect on {endpoint}: {reason}");
+            }
         }
 
-        progress?.Report("Trying default endpoint + MASQUE…");
-        Disconnect();
-        ResetEndpoint();
-        SetProtocol("MASQUE");
-        SetMasqueOptions("h3-with-h2-fallback");
-        Connect();
-        for (int i = 0; i < 6; i++)
+        // Last resort: default + MASQUE (helps when WireGuard UDP is blocked).
+        if (!preferredProtocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
         {
-            await Task.Delay(800, ct).ConfigureAwait(false);
-            var st2 = Status();
-            if (IsConnected(st2))
+            progress?.Report("Trying default endpoint + MASQUE…");
+            Disconnect();
+            ResetEndpoint();
+            SetProtocol("MASQUE");
+            SetMasqueOptions("h3-with-h2-fallback");
+            if (await PollConnectedAsync(ct).ConfigureAwait(false))
                 return (true, "Connected via default endpoint (MASQUE).", null);
         }
 
         return (false, "Could not connect. Your ISP may block WARP; try MASQUE, another endpoint, or another network.", null);
     }
 
-    public static async Task<string?> FetchPublicIpAsync(int timeoutMs = 8000)
+    private static async Task<bool> PollConnectedAsync(CancellationToken ct)
+    {
+        Connect();
+        for (int i = 0; i < 8; i++)
+        {
+            await Task.Delay(700, ct).ConfigureAwait(false);
+            Result st = Status();
+            if (IsConnected(st)) return true;
+            string parsed = ParseStatus(st);
+            if (parsed.Contains("Failed", StringComparison.OrdinalIgnoreCase))
+                return false;
+            // Give the client a couple of polls before treating Disconnected as final.
+            if (i >= 2 && parsed.Contains("Disconnected", StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+        return IsConnected(Status());
+    }
+
+    public sealed class PublicIpInfo
+    {
+        public string? Ip { get; init; }
+        public bool? WarpOn { get; init; }
+        public string? Loc { get; init; }
+    }
+
+    public static async Task<PublicIpInfo> FetchPublicIpInfoAsync(int timeoutMs = 8000)
     {
         try
         {
-            using HttpClient client = new() { Timeout = TimeSpan.FromMilliseconds(timeoutMs) };
-            string body = await client.GetStringAsync("https://cloudflare.com/cdn-cgi/trace").ConfigureAwait(false);
+            using CancellationTokenSource cts = new(timeoutMs);
+            string body = await SharedHttp.GetStringAsync("https://cloudflare.com/cdn-cgi/trace", cts.Token).ConfigureAwait(false);
+            string? ip = null;
+            bool? warp = null;
+            string? loc = null;
             foreach (string line in body.Split('\n'))
             {
                 if (line.StartsWith("ip=", StringComparison.OrdinalIgnoreCase))
-                    return line[3..].Trim();
+                    ip = line[3..].Trim();
+                else if (line.StartsWith("warp=", StringComparison.OrdinalIgnoreCase))
+                    warp = line[5..].Trim().Equals("on", StringComparison.OrdinalIgnoreCase);
+                else if (line.StartsWith("loc=", StringComparison.OrdinalIgnoreCase))
+                    loc = line[4..].Trim();
             }
+            if (!string.IsNullOrEmpty(ip))
+                return new PublicIpInfo { Ip = ip, WarpOn = warp, Loc = loc };
         }
         catch (Exception ex)
         {
-            Debug.WriteLine("FetchPublicIpAsync cf: " + ex.Message);
+            Debug.WriteLine("FetchPublicIpInfoAsync cf: " + ex.Message);
         }
         try
         {
-            using HttpClient client = new() { Timeout = TimeSpan.FromMilliseconds(timeoutMs) };
-            return (await client.GetStringAsync("https://api.ipify.org").ConfigureAwait(false)).Trim();
+            using CancellationTokenSource cts = new(timeoutMs);
+            string ip = (await SharedHttp.GetStringAsync("https://api.ipify.org", cts.Token).ConfigureAwait(false)).Trim();
+            return new PublicIpInfo { Ip = ip, WarpOn = null, Loc = null };
         }
         catch (Exception ex)
         {
-            Debug.WriteLine("FetchPublicIpAsync ipify: " + ex.Message);
-            return null;
+            Debug.WriteLine("FetchPublicIpInfoAsync ipify: " + ex.Message);
+            return new PublicIpInfo();
         }
     }
+
+    public static async Task<string?> FetchPublicIpAsync(int timeoutMs = 8000)
+        => (await FetchPublicIpInfoAsync(timeoutMs).ConfigureAwait(false)).Ip;
 
     private static void Shuffle<T>(IList<T> list)
     {

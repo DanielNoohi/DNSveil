@@ -1,8 +1,10 @@
-// DNSveil GeoHide — Anti-sanction via Shecan + Shelter (web/dev only)
+// DNSveil GeoHide — Anti-sanction via Shecan (web/dev only)
 // Does NOT hide IP from game servers. Enable Rules in Settings after import.
 //
 // Shecan DoH: https://free.shecan.ir/dns-query  (also dns.shecan.ir)
-// Shelter: adjust ShelterDns if your provider URL differs.
+//
+// IMPORTANT: Do NOT route cloudflare.com / engage hosts through Shecan while
+// using Tools → GeoHide WARP — that breaks WARP endpoint discovery.
 
 ShecanDns = https://free.shecan.ir/dns-query;
 ShelterDns = https://dns.shecan.ir/dns-query;
@@ -24,11 +26,7 @@ docker.io|--;dns:ShecanDns,ShelterDns;
 *.docker.io|--;dns:ShecanDns,ShelterDns;
 googleapis.com|--;dns:ShecanDns,ShelterDns;
 *.googleapis.com|--;dns:ShecanDns,ShelterDns;
-google.com|--;dns:ShecanDns,ShelterDns;
-*.google.com|--;dns:ShecanDns,ShelterDns;
 developers.google.com|--;dns:ShecanDns,ShelterDns;
-gstatic.com|--;dns:ShecanDns,ShelterDns;
-*.gstatic.com|--;dns:ShecanDns,ShelterDns;
 openai.com|--;dns:ShecanDns,ShelterDns;
 *.openai.com|--;dns:ShecanDns,ShelterDns;
 chatgpt.com|--;dns:ShecanDns,ShelterDns;
@@ -39,8 +37,6 @@ claude.ai|--;dns:ShecanDns,ShelterDns;
 *.claude.ai|--;dns:ShecanDns,ShelterDns;
 spotify.com|--;dns:ShecanDns,ShelterDns;
 *.spotify.com|--;dns:ShecanDns,ShelterDns;
-cloudflare.com|--;dns:ShecanDns,ShelterDns;
-*.cloudflare.com|--;dns:ShecanDns,ShelterDns;
 
 // Default: no extra action (ISP/DPI path unchanged)
 *|+;
