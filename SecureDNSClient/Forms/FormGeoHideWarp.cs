@@ -61,28 +61,38 @@ public class FormGeoHideWarp : Form
         _lblHelp.Size = new Size(616, 40);
         _lblHelp.Text = "Uses official Cloudflare WARP (warp-cli). Under Iranian DPI: enable Censorship + DPI assist, then Connect (scans IRCF/CF and connects). Destinations see a Cloudflare exit IP — not your ISP.";
 
-        _lblStatus.AutoSize = true;
-        _lblStatus.Location = new Point(12, 56);
+        _lblStatus.AutoSize = false;
+        _lblStatus.Location = new Point(12, 54);
+        _lblStatus.Size = new Size(490, 22);
         _lblStatus.Text = "Status: …";
-        _lblIp.AutoSize = true;
-        _lblIp.Location = new Point(260, 56);
-        _lblIp.Text = "Public IP: …";
+        _lblStatus.AutoEllipsis = true;
 
-        StyleBtn(_btnRefresh, "Refresh", new Point(520, 50), 90);
-        _btnRefresh.Click += async (_, _) => await RefreshStatusAsync();
+        _lblIp.AutoSize = false;
+        _lblIp.Location = new Point(12, 76);
+        _lblIp.Size = new Size(600, 22);
+        _lblIp.Text = "Public IP: …";
+        _lblIp.AutoEllipsis = true;
+
+        StyleBtn(_btnRefresh, "Refresh", new Point(510, 50), 100);
+        _btnRefresh.Click += async (_, _) =>
+        {
+            try { await RefreshStatusAsync(fromUser: true).ConfigureAwait(true); }
+            catch (Exception ex) { Log("Refresh error: " + ex.Message); }
+        };
+        _btnRefresh.BringToFront();
 
         _lblEp.AutoSize = true;
-        _lblEp.Location = new Point(12, 90);
+        _lblEp.Location = new Point(12, 108);
         _lblEp.Text = "Endpoint";
-        _cmbEndpoint.Location = new Point(80, 86);
+        _cmbEndpoint.Location = new Point(80, 104);
         _cmbEndpoint.Size = new Size(280, 28);
         _cmbEndpoint.DropDownStyle = ComboBoxStyle.DropDown;
         StyleCombo(_cmbEndpoint);
 
         _lblProto.AutoSize = true;
-        _lblProto.Location = new Point(380, 90);
+        _lblProto.Location = new Point(380, 108);
         _lblProto.Text = "Protocol";
-        _cmbProtocol.Location = new Point(440, 86);
+        _cmbProtocol.Location = new Point(440, 104);
         _cmbProtocol.Size = new Size(120, 28);
         _cmbProtocol.DropDownStyle = ComboBoxStyle.DropDownList;
         StyleCombo(_cmbProtocol);
@@ -94,12 +104,12 @@ public class FormGeoHideWarp : Form
         };
         _cmbProtocol.SelectedIndex = 0; // MASQUE first under censorship
 
-        StyleBtn(_btnConnect, "Connect", new Point(12, 126), 110);
-        StyleBtn(_btnDisconnect, "Disconnect", new Point(128, 126), 90);
-        StyleBtn(_btnCancel, "Cancel", new Point(224, 126), 70);
-        StyleBtn(_btnMinimize, "Minimize", new Point(300, 126), 80);
-        StyleBtn(_btnInstall, "Get WARP…", new Point(386, 126), 100);
-        StyleBtn(_btnHelp, "Help", new Point(492, 126), 64);
+        StyleBtn(_btnConnect, "Connect", new Point(12, 140), 110);
+        StyleBtn(_btnDisconnect, "Disconnect", new Point(128, 140), 90);
+        StyleBtn(_btnCancel, "Cancel", new Point(224, 140), 70);
+        StyleBtn(_btnMinimize, "Minimize", new Point(300, 140), 80);
+        StyleBtn(_btnInstall, "Get WARP…", new Point(386, 140), 100);
+        StyleBtn(_btnHelp, "Help", new Point(492, 140), 64);
         _btnCancel.Enabled = false;
         _btnConnect.Click += async (_, _) => await ConnectAsync();
         _btnDisconnect.Click += async (_, _) => await DisconnectAsync();
@@ -110,7 +120,7 @@ public class FormGeoHideWarp : Form
             MessageBoxButtons.OK, MessageBoxIcon.Information);
 
         _chkCensorship.AutoSize = true;
-        _chkCensorship.Location = new Point(12, 162);
+        _chkCensorship.Location = new Point(12, 176);
         _chkCensorship.Text = "Censorship mode (Iran) — IRCF + CF scan, MASQUE (needed under DPI)";
         _chkCensorship.ForeColor = Color.WhiteSmoke;
         _chkCensorship.BackColor = Color.Transparent;
@@ -118,14 +128,14 @@ public class FormGeoHideWarp : Form
         _chkCensorship.CheckedChanged += (_, _) => SyncOptionConflicts(fromUser: true);
 
         _chkDpiAssist.AutoSize = true;
-        _chkDpiAssist.Location = new Point(12, 186);
+        _chkDpiAssist.Location = new Point(12, 200);
         _chkDpiAssist.Text = "DPI assist — GoodbyeDPI only during connect (auto-stopped after)";
         _chkDpiAssist.ForeColor = Color.WhiteSmoke;
         _chkDpiAssist.BackColor = Color.Transparent;
         _chkDpiAssist.Checked = true;
 
         _chkLowLatency.AutoSize = true;
-        _chkLowLatency.Location = new Point(12, 210);
+        _chkLowLatency.Location = new Point(12, 224);
         _chkLowLatency.Text = "Low latency (gaming) — tunnel_only before connect + Iran excludes (keeps proven tunnel)";
         _chkLowLatency.ForeColor = Color.WhiteSmoke;
         _chkLowLatency.BackColor = Color.Transparent;
@@ -133,9 +143,9 @@ public class FormGeoHideWarp : Form
         _chkLowLatency.CheckedChanged += (_, _) => SyncOptionConflicts(fromUser: true);
 
         _lblPreset.AutoSize = true;
-        _lblPreset.Location = new Point(12, 242);
+        _lblPreset.Location = new Point(12, 256);
         _lblPreset.Text = "Rules preset";
-        _cmbPreset.Location = new Point(100, 238);
+        _cmbPreset.Location = new Point(100, 252);
         _cmbPreset.Size = new Size(260, 28);
         _cmbPreset.DropDownStyle = ComboBoxStyle.DropDownList;
         StyleCombo(_cmbPreset);
@@ -146,18 +156,18 @@ public class FormGeoHideWarp : Form
             "Gaming Smart DNS template"
         });
         _cmbPreset.SelectedIndex = 0;
-        StyleBtn(_btnImportPreset, "Import into Rules", new Point(372, 236), 150);
+        StyleBtn(_btnImportPreset, "Import into Rules", new Point(372, 250), 150);
         _btnImportPreset.Click += async (_, _) => await ImportSelectedPresetAsync(silent: false);
 
         _chkImportAfterConnect.AutoSize = true;
-        _chkImportAfterConnect.Location = new Point(12, 272);
+        _chkImportAfterConnect.Location = new Point(12, 286);
         _chkImportAfterConnect.Text = "Also import selected preset after successful connect";
         _chkImportAfterConnect.ForeColor = Color.WhiteSmoke;
         _chkImportAfterConnect.BackColor = Color.Transparent;
         _chkImportAfterConnect.Checked = false;
 
-        _log.Location = new Point(12, 300);
-        _log.Size = new Size(616, 230);
+        _log.Location = new Point(12, 314);
+        _log.Size = new Size(616, 216);
         _log.Multiline = true;
         _log.ScrollBars = ScrollBars.Vertical;
         _log.ReadOnly = true;
@@ -338,25 +348,76 @@ public class FormGeoHideWarp : Form
         _btnMinimize.Enabled = true; // always allow minimize
     }
 
-    private async Task RefreshStatusAsync()
+    private async Task RefreshStatusAsync(bool fromUser = false)
     {
-        if (!WarpCli.IsInstalled())
+        if (fromUser)
         {
-            _lblStatus.Text = "Status: WARP not installed";
-            _lblIp.Text = "Public IP: —";
-            return;
+            _lblStatus.Text = "Status: refreshing…";
+            _lblIp.Text = "Public IP: …";
+            Log("Refreshing WARP status / public IP…");
+            _btnRefresh.Enabled = false;
         }
-        if (!WarpCli.IsServiceRunning())
-            _lblStatus.Text = "Status: WARP service not running";
-        var st = await Task.Run(() => WarpCli.Status()).ConfigureAwait(true);
-        if (WarpCli.IsServiceRunning())
-            _lblStatus.Text = "Status: " + WarpCli.ParseStatus(st);
-        var info = await WarpCli.FetchPublicIpInfoAsync().ConfigureAwait(true);
-        string ipPart = info.Ip ?? "unavailable";
-        string warpPart = info.WarpOn == true ? " (warp=on)" : info.WarpOn == false ? " (warp=off)" : "";
-        string locPart = string.IsNullOrEmpty(info.Loc) ? "" : $" [{info.Loc}]";
-        string coloPart = string.IsNullOrEmpty(info.Colo) ? "" : $" colo={info.Colo}";
-        _lblIp.Text = "Public IP: " + ipPart + warpPart + locPart + coloPart;
+
+        try
+        {
+            if (!WarpCli.IsInstalled())
+            {
+                _lblStatus.Text = "Status: WARP not installed";
+                _lblIp.Text = "Public IP: —";
+                if (fromUser) Log("Refresh: warp-cli not installed.");
+                return;
+            }
+
+            // User Refresh should try to wake a stopped service (same as Connect preflight).
+            if (fromUser && !WarpCli.IsServiceRunning())
+            {
+                _lblStatus.Text = "Status: starting WARP service…";
+                var (svcOk, svcMsg, _) = await WarpPreflight.EnsureWarpServiceAsync(
+                    fromUser ? new Progress<string>(Log) : null).ConfigureAwait(true);
+                if (!svcOk)
+                {
+                    _lblStatus.Text = "Status: WARP service not running";
+                    _lblIp.Text = "Public IP: —";
+                    Log("Refresh: " + svcMsg);
+                    return;
+                }
+            }
+            else if (!WarpCli.IsServiceRunning())
+            {
+                _lblStatus.Text = "Status: WARP service not running";
+            }
+
+            var st = await Task.Run(() => WarpCli.Status()).ConfigureAwait(true);
+            string parsed = WarpCli.ParseStatus(st);
+            if (!WarpCli.IsServiceRunning() && string.IsNullOrWhiteSpace(st.Combined))
+                _lblStatus.Text = "Status: WARP service not running";
+            else
+                _lblStatus.Text = "Status: " + (string.IsNullOrWhiteSpace(parsed) ? "(empty)" : parsed);
+
+            var info = await WarpCli.FetchPublicIpInfoAsync(6000).ConfigureAwait(true);
+            string ipPart = info.Ip ?? "unavailable";
+            string warpPart = info.WarpOn == true ? " (warp=on)" : info.WarpOn == false ? " (warp=off)" : " (warp=?)";
+            string locPart = string.IsNullOrEmpty(info.Loc) ? "" : $" [{info.Loc}]";
+            string coloPart = string.IsNullOrEmpty(info.Colo) ? "" : $" colo={info.Colo}";
+            _lblIp.Text = "Public IP: " + ipPart + warpPart + locPart + coloPart;
+
+            if (fromUser)
+            {
+                Log($"Refresh done — {parsed} | IP {ipPart}{warpPart}{locPart}{coloPart}" +
+                    (string.IsNullOrEmpty(info.Error) ? "" : $" ({info.Error})"));
+            }
+        }
+        catch (Exception ex)
+        {
+            _lblStatus.Text = "Status: refresh failed";
+            if (fromUser) Log("Refresh error: " + ex.Message);
+            else throw;
+        }
+        finally
+        {
+            if (fromUser && !_busy)
+                _btnRefresh.Enabled = true;
+        }
     }
 
     private async Task DisconnectAsync()
