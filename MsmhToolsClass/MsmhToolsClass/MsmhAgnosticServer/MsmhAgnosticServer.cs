@@ -42,8 +42,11 @@ public partial class MsmhAgnosticServer
     internal static readonly string ODnsMessageContentType = "application/oblivious-dns-message";
     internal static readonly int DNS_HEADER_LENGTH = 12;
     internal static readonly SslProtocols SSL_Protocols = SslProtocols.None | SslProtocols.Tls12 | SslProtocols.Tls13;
+    /// <summary>When false, TLS peers must present a valid certificate. Set from AgnosticSettings.AllowInsecure on Start.</summary>
+    internal static bool AllowInsecureCertificates = false;
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Style", "IDE0060:Remove unused parameter", Justification = "<Pending>")]
-    internal static bool Callback(object sender, X509Certificate? cert, X509Chain? chain, SslPolicyErrors sslPolicyErrors) => true;
+    internal static bool Callback(object sender, X509Certificate? cert, X509Chain? chain, SslPolicyErrors sslPolicyErrors)
+        => AllowInsecureCertificates || sslPolicyErrors == SslPolicyErrors.None;
 
     //======================================= Start Server
     internal AgnosticSettings Settings_ = new();
@@ -93,8 +96,9 @@ public partial class MsmhAgnosticServer
             if (IsRunning) return;
             IsRunning = true;
 
-            Stopwatch stopwatch = Stopwatch.StartNew();
+            Stopwatch             stopwatch = Stopwatch.StartNew();
             Settings_ = settings;
+            AllowInsecureCertificates = settings.AllowInsecure;
             await Settings_.InitializeAsync();
 
             Welcome(true, TimeSpan.Zero);

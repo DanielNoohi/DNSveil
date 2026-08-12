@@ -735,10 +735,22 @@ public partial class FormMain : Form
         }
     }
 
+    public void EnableRulesSetting()
+    {
+        try
+        {
+            this.InvokeIt(() => CustomCheckBoxSettingEnableRules.Checked = true);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("EnableRulesSetting: " + ex.Message);
+        }
+    }
+
     //============================== About
     private void CustomLabelAboutThis_Click(object sender, EventArgs e)
     {
-        OpenLinks.OpenUrl("https://github.com/msasanmh/SecureDNSClient/");
+        OpenLinks.OpenUrl("https://github.com/DanielNoohi/DNSveil/");
     }
 
     private void LinkLabelDNSLookup_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)

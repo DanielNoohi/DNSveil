@@ -166,13 +166,11 @@ public partial class AgnosticProgram
                                         }
                                         else
                                         {
-                                            // Can Stuck In An Endless Loop If
-                                            // Upstream Is Equal To Server Address
-                                            // And
-                                            // A DNS In The List Doesn't Have A FakeDnsIP
-                                            // Because Of DnsClient Upstream And Bootstrap TCP Upstream.
-                                            // I Refuse To Detect It And Set ProxyScheme To NULL For The Sake Of Performance.
-                                            // I Set Bootstrap To IPAddress.Any To Avoid Bootstrap TCP Upstream.
+                                            // Fail closed: disable DNS upstream proxy to avoid endless loops.
+                                            Debug.WriteLine("Rules_Get: upstream equals server — clearing dnsproxy for this lookup.");
+                                            dnsProxyScheme = null;
+                                            dnsProxyUser = null;
+                                            dnsProxyPass = null;
                                             bootstrap = IPAddress.Any;
                                         }
                                     }

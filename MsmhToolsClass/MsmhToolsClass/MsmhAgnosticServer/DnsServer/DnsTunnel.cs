@@ -199,13 +199,12 @@ public class DnsTunnel
                             }
                             else
                             {
-                                // Can Stuck In An Endless Loop If
-                                // Upstream Is Equal To Server Address
-                                // And
-                                // A DNS In The List Doesn't Have A FakeDnsIP
-                                // Because Of DnsClient Upstream And Bootstrap TCP Upstream.
-                                // I Refuse To Detect It And Set ProxyScheme To NULL For The Sake Of Performance.
-                                // I Set Bootstrap To IPAddress.Any To Avoid Bootstrap TCP Upstream.
+                                // Fail closed: clearing proxy avoids DNS↔proxy endless loops when
+                                // upstream equals this server and the DNS entry has no FakeDnsIP.
+                                Debug.WriteLine("DnsTunnel: upstream equals server address — disabling upstream proxy for this query.");
+                                proxyScheme = null;
+                                proxyUser = null;
+                                proxyPass = null;
                                 bootstrap = IPAddress.Any;
                             }
                         }

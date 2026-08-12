@@ -1,9 +1,11 @@
-# DNSveil (formerly Secure DNS Client)
+# DNSveil (DanielNoohi fork)
 
-![GitHub all releases](https://img.shields.io/github/downloads/msasanmh/DNSveil/total)
-![GitHub top language](https://img.shields.io/github/languages/top/msasanmh/DNSveil)
-![GitHub](https://img.shields.io/github/license/msasanmh/DNSveil)
-![GitHub release (with filter)](https://img.shields.io/github/v/release/msasanmh/DNSveil?link=https%3A%2F%2Fgithub.com%2Fmsasanmh%2FDNSveil%2Freleases%2Flatest)
+Fork of [msasanmh/DNSveil](https://github.com/msasanmh/DNSveil) (formerly Secure DNS Client) with **GeoHide WARP**, Smart DNS rule presets, and related fixes.
+
+**Current release:** [v3.4.0](https://github.com/DanielNoohi/DNSveil/releases/tag/v3.4.0)
+
+![GitHub](https://img.shields.io/github/license/DanielNoohi/DNSveil)
+![GitHub release](https://img.shields.io/github/v/release/DanielNoohi/DNSveil)
 
 **A Secure DNS Client.** Using: _[Msmh Agnostic Server](https://github.com/msasanmh/MsmhAgnosticServer)_, _[DNSLookup](https://github.com/ameshkov/dnslookup)_ and _[GoodbyeDPI](https://github.com/ValdikSS/GoodbyeDPI)_. (Windows only)
 
@@ -15,6 +17,7 @@ Server implementation: _DoH and Plain DNS (UDP & TCP)._
 - *Bypass YouTube, Twitter and any SNI/DNS based blocked websites.*
 - *Encode and decode DNSCrypt STAMP (sdns://).*
 - *Share to other devices via Proxy (HTTP, HTTPS, SOCKS4, SOCKS4A, SOCKS5).*
+- *Optional GeoHide via Cloudflare WARP (`warp-cli`) when remotes must not see your ISP IP (no VPS required).*
 
 **Requirements:** `.NET Desktop Runtime 6` and `ASP.NET Core Runtime 6`
 
@@ -29,16 +32,24 @@ Then install [ASP.NET Core Runtime x86 v6.0.36](https://dotnet.microsoft.com/en-
 [Microsoft .NET 6.0 Runtime Page](https://dotnet.microsoft.com/en-us/download/dotnet/6.0)
 
 **Download:**\
-[Download latest version of DNSveil](https://github.com/msasanmh/DNSveil/releases/latest)
+[This fork — latest release](https://github.com/DanielNoohi/DNSveil/releases/latest) · [Upstream releases](https://github.com/msasanmh/DNSveil/releases/latest)
+
+---
+
+### What's new in this fork (v3.4.0)
+* **Tools → GeoHide WARP** — drive official Cloudflare WARP from the app (PyWarp-style `warp-cli`: endpoints, WireGuard/MASQUE, auto-find).
+* **Rules presets** in `Assets/Presets/` — Shecan anti-sanction, gaming Smart DNS template, upstream-proxy template.
+* **Safer defaults** — update check without `AllowInsecure`; TLS validation honors `AllowInsecure`; DNS upstream equal to local server fails closed.
+* README clarifies that encrypted DNS alone does not change your public IP.
 
 ---
 
 ### Notes
 * **Encrypted DNS is not a VPN.** DoH/DoT/DNSCrypt hide DNS queries from your ISP; they do **not** by themselves change the IP address that websites or apps see.
-* Optional **GeoHide WARP** (Tools tab) can drive official Cloudflare WARP (`warp-cli`) so destinations see a Cloudflare exit IP. That requires installing [Cloudflare WARP](https://one.one.one.one/). See `Assets/Presets/README_WARP.md`.
+* Optional **GeoHide WARP** (Tools tab) drives official Cloudflare WARP (`warp-cli`) so destinations see a Cloudflare exit IP. Install [Cloudflare WARP](https://one.one.one.one/) first. See [`Assets/Presets/README_WARP.md`](Assets/Presets/README_WARP.md).
 * Smart DNS providers (e.g. Shecan) only affect domains they proxy; they are not a full IP hide.
-* DNSveil is open source. If your Antivirus raises an alert it's often a False-Positive — WinDivert (used by GoodbyeDPI) is commonly flagged as PUA. Add it to exclusions if needed.
-* After changing `Enable SSL Decryption` you need to restart your browser for the change to take effect.
+* Open source (GPL-3.0). Antivirus alerts are often False-Positive — WinDivert (GoodbyeDPI) is commonly flagged as PUA; add exclusions if needed.
+* After changing `Enable SSL Decryption` restart your browser for the change to take effect.
 
 ---
 
@@ -63,6 +74,17 @@ Then install [ASP.NET Core Runtime x86 v6.0.36](https://dotnet.microsoft.com/en-
 * Extract and import servers from URLs.
 * Double-Click on a custom server to get info and status.
 * Import/Export all settings.
+
+---
+
+### GeoHide quick start
+1. Install [Cloudflare WARP](https://one.one.one.one/) (provides `warp-cli`).
+2. Run DNSveil → **Tools → GeoHide WARP**.
+3. Click **Connect** (or **Auto-find endpoint** if connect fails).
+4. Confirm **Public IP** is Cloudflare, then use your apps.
+5. Optional: import Shecan rules for sanctioned websites (same window).
+
+More: [`Assets/Presets/README_GeoHide.md`](Assets/Presets/README_GeoHide.md) · [`Assets/Presets/README_WARP.md`](Assets/Presets/README_WARP.md)
 
 ---
 
@@ -200,7 +222,9 @@ save.tube|--;
 
 ---
 
-[Find Videos in Help Directory.](https://github.com/msasanmh/DNSveil/tree/main/Help)\
-[Another Guide.](https://rentry.co/SecureDNSClient)
+### Credits
+Upstream project by [MSasanMH](https://github.com/msasanmh/DNSveil). This repository is an independent fork with GeoHide and maintenance patches.
+
+[Help videos (upstream)](https://github.com/msasanmh/DNSveil/tree/main/Help) · [Guide](https://rentry.co/SecureDNSClient)
 
 

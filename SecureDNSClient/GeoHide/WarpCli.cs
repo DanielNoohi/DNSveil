@@ -29,6 +29,9 @@ public static class WarpCli
     public static readonly int[] WireGuardPorts = { 2408, 500, 1701, 4500 };
     public static readonly int[] MasquePorts = { 443, 8443 };
 
+    private static string? _cachedExe;
+    private static DateTime _cachedExeAt = DateTime.MinValue;
+
     public sealed class Result
     {
         public int ExitCode { get; init; }
@@ -36,15 +39,27 @@ public static class WarpCli
         public string StdErr { get; init; } = "";
         public bool Ok => ExitCode == 0;
         public string ErrorLine =>
-            string.IsNullOrWhiteSpace(StdErr) ? StdOut.Split('\n').FirstOrDefault()?.Trim() ?? "" : StdErr.Split('\n').FirstOrDefault()?.Trim() ?? "";
+            string.IsNullOrWhiteSpace(StdErr)
+                ? StdOut.Split('\n').FirstOrDefault()?.Trim() ?? ""
+                : StdErr.Split('\n').FirstOrDefault()?.Trim() ?? "";
     }
 
-    public static string? FindExecutable()
+    public static string? FindExecutable(bool forceRefresh = false)
     {
         try
         {
+            if (!forceRefresh && _cachedExe != null && (DateTime.UtcNow - _cachedExeAt).TotalMinutes < 5)
+            {
+                if (File.Exists(_cachedExe)) return _cachedExe;
+            }
+
             string? which = FindOnPath("warp-cli.exe") ?? FindOnPath("warp-cli");
-            if (!string.IsNullOrEmpty(which)) return which;
+            if (!string.IsNullOrEmpty(which))
+            {
+                _cachedExe = which;
+                _cachedExeAt = DateTime.UtcNow;
+                return which;
+            }
 
             string[] candidates =
             {
@@ -53,12 +68,20 @@ public static class WarpCli
                 @"C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe",
             };
             foreach (string c in candidates)
-                if (File.Exists(c)) return c;
+            {
+                if (File.Exists(c))
+                {
+                    _cachedExe = c;
+                    _cachedExeAt = DateTime.UtcNow;
+                    return c;
+                }
+            }
         }
         catch (Exception ex)
         {
             Debug.WriteLine("WarpCli.FindExecutable: " + ex.Message);
         }
+        _cachedExe = null;
         return null;
     }
 
@@ -87,9 +110,9 @@ public static class WarpCli
             p.Start();
             string stdout = p.StandardOutput.ReadToEnd();
             string stderr = p.StandardError.ReadToEnd();
-            if (!p.WaitForExit(60_000))
+            if (!p.WaitForExit(45_000))
             {
-                try { p.Kill(entireProcessTree: true); } catch { }
+                try { p.Kill(entireProcessTree: true); } catch { /* ignore */ }
                 return new Result { ExitCode = -1, StdErr = "warp-cli timed out" };
             }
             return new Result { ExitCode = p.ExitCode, StdOut = stdout?.Trim() ?? "", StdErr = stderr?.Trim() ?? "" };
@@ -113,13 +136,19 @@ public static class WarpCli
 
     public static string ParseStatus(Result r)
     {
-        string text = (r.StdOut + "\n" + r.StdErr);
+        string text = r.StdOut + "\n" + r.StdErr;
         foreach (string line in text.Split('\n'))
         {
             string s = line.Trim();
-            if (s.StartsWith("Status", StringComparison.OrdinalIgnoreCase) ||
-                s.Contains("Connected", StringComparison.OrdinalIgnoreCase) ||
-                s.Contains("Disconnected", StringComparison.OrdinalIgnoreCase))
+            if (s.StartsWith("Status", StringComparison.OrdinalIgnoreCase))
+                return s;
+        }
+        foreach (string line in text.Split('\n'))
+        {
+            string s = line.Trim();
+            if (s.Contains("Connected", StringComparison.OrdinalIgnoreCase) ||
+                s.Contains("Disconnected", StringComparison.OrdinalIgnoreCase) ||
+                s.Contains("Connecting", StringComparison.OrdinalIgnoreCase))
                 return s;
         }
         return string.IsNullOrWhiteSpace(r.StdOut) ? (r.Ok ? "Unknown" : r.ErrorLine) : r.StdOut.Split('\n')[0].Trim();
@@ -127,35 +156,47 @@ public static class WarpCli
 
     public static bool IsConnected(Result status)
     {
-        string t = (status.StdOut + "\n" + status.StdErr);
+        string t = status.StdOut + "\n" + status.StdErr;
+        // Avoid treating "Connecting" as success
+        if (t.Contains("Connecting", StringComparison.OrdinalIgnoreCase) &&
+            !t.Contains("Status update: Connected", StringComparison.OrdinalIgnoreCase) &&
+            !t.Contains("Status: Connected", StringComparison.OrdinalIgnoreCase))
+            return false;
+
         if (t.Contains("Status update: Connected", StringComparison.OrdinalIgnoreCase) ||
             t.Contains("Status: Connected", StringComparison.OrdinalIgnoreCase))
             return true;
-        // Older / terse outputs
+
         bool hasConnected = t.Contains("Connected", StringComparison.OrdinalIgnoreCase);
         bool hasDisconnected = t.Contains("Disconnected", StringComparison.OrdinalIgnoreCase);
         return hasConnected && !hasDisconnected;
     }
 
-    /// <summary>Build endpoint candidates like pywarp (CF anycast + WG/MASQUE ports).</summary>
-    public static IEnumerable<string> EnumerateEndpointCandidates(bool includeMasquePorts = true)
+    /// <summary>
+    /// Endpoint candidates matched to protocol (WG ports vs MASQUE ports).
+    /// </summary>
+    public static IEnumerable<string> EnumerateEndpointCandidates(string protocol = "WireGuard", int maxCount = 24)
     {
-        foreach (string host in EngageHosts)
+        bool masque = protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase);
+        int[] ports = masque ? MasquePorts : WireGuardPorts;
+
+        // Prefer hostname first, then a shuffled subset of IPs to avoid long scans
+        var hosts = new List<string> { EngageHosts[0] };
+        var ips = EngageHosts.Skip(1).ToList();
+        Shuffle(ips);
+        hosts.AddRange(ips);
+
+        int n = 0;
+        foreach (string host in hosts)
         {
-            foreach (int port in WireGuardPorts)
-                yield return $"{host}:{port}";
-            if (includeMasquePorts)
+            foreach (int port in ports)
             {
-                foreach (int port in MasquePorts)
-                    yield return $"{host}:{port}";
+                yield return $"{host}:{port}";
+                if (++n >= maxCount) yield break;
             }
         }
     }
 
-    /// <summary>
-    /// Try disconnect → set protocol → set endpoint → mode warp → connect.
-    /// Returns first combination that reports Connected.
-    /// </summary>
     public static async Task<(bool Ok, string Message, string? Endpoint)> TryConnectWithFallbackAsync(
         IEnumerable<string> endpoints,
         string preferredProtocol = "WireGuard",
@@ -168,7 +209,6 @@ public static class WarpCli
         AcceptTos();
         Disconnect();
 
-        // Ensure registration exists (ignore failure if already registered)
         var show = Run("-j", "registration", "show");
         if (!show.Ok)
         {
@@ -181,6 +221,8 @@ public static class WarpCli
 
         SetModeWarp();
         SetProtocol(preferredProtocol);
+        if (preferredProtocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
+            SetMasqueOptions("h3-with-h2-fallback");
 
         foreach (string endpoint in endpoints)
         {
@@ -194,28 +236,36 @@ public static class WarpCli
                 continue;
             }
 
-            var conn = Connect();
-            await Task.Delay(2500, ct).ConfigureAwait(false);
-            var st = Status();
-            if (IsConnected(st))
-                return (true, $"Connected via {endpoint} ({preferredProtocol}).", endpoint);
+            Connect();
+            // Poll briefly — connection is often not instant
+            for (int i = 0; i < 6; i++)
+            {
+                await Task.Delay(800, ct).ConfigureAwait(false);
+                var st = Status();
+                if (IsConnected(st))
+                    return (true, $"Connected via {endpoint} ({preferredProtocol}).", endpoint);
+                if (ParseStatus(st).Contains("Failed", StringComparison.OrdinalIgnoreCase))
+                    break;
+            }
 
-            progress?.Report($"No connect on {endpoint}: {ParseStatus(st)}");
+            progress?.Report($"No connect on {endpoint}: {ParseStatus(Status())}");
         }
 
-        // Last resort: reset endpoint (Cloudflare default) + MASQUE
         progress?.Report("Trying default endpoint + MASQUE…");
         Disconnect();
         ResetEndpoint();
         SetProtocol("MASQUE");
         SetMasqueOptions("h3-with-h2-fallback");
         Connect();
-        await Task.Delay(3000, ct).ConfigureAwait(false);
-        var st2 = Status();
-        if (IsConnected(st2))
-            return (true, "Connected via default endpoint (MASQUE).", null);
+        for (int i = 0; i < 6; i++)
+        {
+            await Task.Delay(800, ct).ConfigureAwait(false);
+            var st2 = Status();
+            if (IsConnected(st2))
+                return (true, "Connected via default endpoint (MASQUE).", null);
+        }
 
-        return (false, "Could not connect. Your ISP may block WARP; try another network or endpoint.", null);
+        return (false, "Could not connect. Your ISP may block WARP; try MASQUE, another endpoint, or another network.", null);
     }
 
     public static async Task<string?> FetchPublicIpAsync(int timeoutMs = 8000)
@@ -223,8 +273,8 @@ public static class WarpCli
         try
         {
             using HttpClient client = new() { Timeout = TimeSpan.FromMilliseconds(timeoutMs) };
-            string json = await client.GetStringAsync("https://cloudflare.com/cdn-cgi/trace").ConfigureAwait(false);
-            foreach (string line in json.Split('\n'))
+            string body = await client.GetStringAsync("https://cloudflare.com/cdn-cgi/trace").ConfigureAwait(false);
+            foreach (string line in body.Split('\n'))
             {
                 if (line.StartsWith("ip=", StringComparison.OrdinalIgnoreCase))
                     return line[3..].Trim();
@@ -232,14 +282,27 @@ public static class WarpCli
         }
         catch (Exception ex)
         {
-            Debug.WriteLine("FetchPublicIpAsync: " + ex.Message);
+            Debug.WriteLine("FetchPublicIpAsync cf: " + ex.Message);
         }
         try
         {
             using HttpClient client = new() { Timeout = TimeSpan.FromMilliseconds(timeoutMs) };
             return (await client.GetStringAsync("https://api.ipify.org").ConfigureAwait(false)).Trim();
         }
-        catch { return null; }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("FetchPublicIpAsync ipify: " + ex.Message);
+            return null;
+        }
+    }
+
+    private static void Shuffle<T>(IList<T> list)
+    {
+        for (int i = list.Count - 1; i > 0; i--)
+        {
+            int j = Random.Shared.Next(i + 1);
+            (list[i], list[j]) = (list[j], list[i]);
+        }
     }
 
     private static string? FindOnPath(string fileName)
@@ -253,7 +316,7 @@ public static class WarpCli
                 string full = Path.Combine(dir.Trim(), fileName);
                 if (File.Exists(full)) return full;
             }
-            catch { }
+            catch { /* ignore */ }
         }
         return null;
     }

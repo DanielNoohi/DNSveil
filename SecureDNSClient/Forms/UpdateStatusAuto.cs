@@ -185,8 +185,9 @@ public partial class FormMain
                 return;
             }
 
-            // Prefer DNSveil; keep SecureDNSClient URL as fallback for older mirrors
-            string updateUrl = "https://raw.githubusercontent.com/msasanmh/DNSveil/main/update";
+            // Prefer this fork's update file, then upstream DNSveil, then legacy SecureDNSClient
+            string updateUrl = "https://raw.githubusercontent.com/DanielNoohi/DNSveil/main/update";
+            string updateUrlUpstream = "https://raw.githubusercontent.com/msasanmh/DNSveil/main/update";
             string updateUrlFallback = "https://raw.githubusercontent.com/msasanmh/SecureDNSClient/main/update";
             string update = string.Empty;
             string labelUpdate = string.Empty;
@@ -216,12 +217,18 @@ public partial class FormMain
                 }
                 else
                 {
-                    // Fallback URL
-                    hr.URI = new Uri(updateUrlFallback, UriKind.Absolute);
-                    hrr = await HttpRequest.SendAsync(hr);
-                    if (hrr.IsSuccess)
-                        update = Encoding.UTF8.GetString(hrr.Data);
-                    else
+                    foreach (string fallback in new[] { updateUrlUpstream, updateUrlFallback })
+                    {
+                        hr.URI = new Uri(fallback, UriKind.Absolute);
+                        hrr = await HttpRequest.SendAsync(hr);
+                        if (hrr.IsSuccess)
+                        {
+                            update = Encoding.UTF8.GetString(hrr.Data);
+                            break;
+                        }
+                    }
+
+                    if (string.IsNullOrEmpty(update))
                     {
                         // With System Proxy
                         string systemProxyScheme = NetworkTool.GetSystemProxy();
@@ -254,7 +261,7 @@ public partial class FormMain
                 string newVersion = split[0].Trim();
                 string currentVersion = Info.GetAppInfo(Assembly.GetExecutingAssembly()).ProductVersion ?? "99.99.99";
                 downloadUrl = split[1].Trim();
-                if (string.IsNullOrEmpty(downloadUrl)) downloadUrl = "https://github.com/msasanmh/DNSveil/releases/latest";
+                if (string.IsNullOrEmpty(downloadUrl)) downloadUrl = "https://github.com/DanielNoohi/DNSveil/releases/latest";
 
                 int versionResult = Info.VersionCompare(newVersion, currentVersion);
                 if (versionResult == 1)

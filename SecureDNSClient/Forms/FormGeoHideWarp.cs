@@ -81,7 +81,7 @@ public class FormGeoHideWarp : Form
         var lblEp = new CustomLabel { Text = "Endpoint", AutoSize = true, Margin = new Padding(0, 8, 8, 0) };
         _cmbEndpoint.Size = new Size(280, 28);
         _cmbEndpoint.DropDownStyle = ComboBoxStyle.DropDown;
-        foreach (string ep in WarpCli.EnumerateEndpointCandidates().Take(40))
+        foreach (string ep in WarpCli.EnumerateEndpointCandidates("WireGuard", 40))
             _cmbEndpoint.Items.Add(ep);
         _cmbEndpoint.Items.Insert(0, "(Cloudflare default)");
         _cmbEndpoint.SelectedIndex = 0;
@@ -217,7 +217,7 @@ public class FormGeoHideWarp : Form
             IEnumerable<string> endpoints;
             if (auto)
             {
-                endpoints = WarpCli.EnumerateEndpointCandidates();
+                endpoints = WarpCli.EnumerateEndpointCandidates(protocol, 24);
                 Log("Auto-scanning endpoints (PyWarp-style)…");
             }
             else
@@ -298,6 +298,8 @@ public class FormGeoHideWarp : Form
             var (ok, message) = await GeoHidePresets.ImportIntoRulesAsync(
                 GeoHidePresets.PresetKind.AntiSanctionShecanShelter, merge: true).ConfigureAwait(true);
             Log(message);
+            if (Application.OpenForms["FormMain"] is FormMain main)
+                main.EnableRulesSetting();
             if (!silent)
                 CustomMessageBox.Show(this, message, ok ? "Rules" : "Rules error",
                     MessageBoxButtons.OK, ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning);

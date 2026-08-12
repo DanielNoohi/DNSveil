@@ -9,12 +9,12 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Copyright>MSasanMH</Copyright>
     <Product>SDC - Secure DNS Client</Product>
-    <Version>$(VersionPrefix)3.3.3</Version>
+    <Version>$(VersionPrefix)3.4.0</Version>
     <PackageIcon>SecureDNSClient.png</PackageIcon>
     <ApplicationIcon>SecureDNSClientMulti.ico</ApplicationIcon>
     <Platforms>AnyCPU;x64;x86</Platforms>
     <Description>A Secure DNS Client</Description>
-    <PackageProjectUrl>https://github.com/msasanmh/DNSveil</PackageProjectUrl>
+    <PackageProjectUrl>https://github.com/DanielNoohi/DNSveil</PackageProjectUrl>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
