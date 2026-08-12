@@ -37,7 +37,7 @@ public static class WarpCli
     private static HttpClient CreateHttpClient()
     {
         HttpClient c = new() { Timeout = TimeSpan.FromSeconds(12) };
-        c.DefaultRequestHeaders.UserAgent.ParseAdd("DNSveil-GeoHide/3.4");
+        c.DefaultRequestHeaders.UserAgent.ParseAdd("DNSveil-GeoHide/3.5");
         return c;
     }
 
@@ -97,6 +97,20 @@ public static class WarpCli
     }
 
     public static bool IsInstalled() => !string.IsNullOrEmpty(FindExecutable());
+
+    /// <summary>True when Cloudflare WARP service process appears to be running.</summary>
+    public static bool IsServiceRunning()
+    {
+        try
+        {
+            return Process.GetProcessesByName("warp-svc").Length > 0
+                || Process.GetProcessesByName("Cloudflare WARP").Length > 0;
+        }
+        catch
+        {
+            return true; // don't block connect if we cannot inspect processes
+        }
+    }
 
     public static Result Run(params string[] args)
     {
@@ -222,30 +236,20 @@ public static class WarpCli
 
     public static bool IsConnected(Result status)
     {
-        string t = status.Combined;
-        // Prefer explicit Status lines so "Connecting" is never treated as success.
-        foreach (string line in t.Split('\n'))
+        // Strict parsing: "Not Connected" must never count as Connected.
+        foreach (string line in status.Combined.Split('\n'))
         {
             string s = line.Trim();
             if (!s.StartsWith("Status", StringComparison.OrdinalIgnoreCase)) continue;
-            if (s.Contains("Connected", StringComparison.OrdinalIgnoreCase) &&
-                !s.Contains("Disconnected", StringComparison.OrdinalIgnoreCase) &&
-                !s.Contains("Connecting", StringComparison.OrdinalIgnoreCase))
+
+            int colon = s.IndexOf(':');
+            string value = colon >= 0 ? s[(colon + 1)..].Trim() : s;
+            if (value.Equals("Connected", StringComparison.OrdinalIgnoreCase))
                 return true;
-            if (s.Contains("Connecting", StringComparison.OrdinalIgnoreCase) ||
-                s.Contains("Disconnected", StringComparison.OrdinalIgnoreCase))
-                return false;
-        }
-
-        if (t.Contains("Connecting", StringComparison.OrdinalIgnoreCase))
+            // Any other Status line (Connecting / Disconnected / Not connected / …) is not success.
             return false;
-        if (t.Contains("Status update: Connected", StringComparison.OrdinalIgnoreCase) ||
-            t.Contains("Status: Connected", StringComparison.OrdinalIgnoreCase))
-            return true;
-
-        bool hasConnected = t.Contains("Connected", StringComparison.OrdinalIgnoreCase);
-        bool hasDisconnected = t.Contains("Disconnected", StringComparison.OrdinalIgnoreCase);
-        return hasConnected && !hasDisconnected;
+        }
+        return false;
     }
 
     /// <summary>
@@ -272,20 +276,23 @@ public static class WarpCli
         }
     }
 
-    public static async Task<(bool Ok, string Message, string? Endpoint)> TryConnectWithFallbackAsync(
+    public static async Task<(bool Ok, string Message, string? Endpoint, string Protocol)> TryConnectWithFallbackAsync(
         IEnumerable<string>? endpoints,
         string preferredProtocol = "WireGuard",
         IProgress<string>? progress = null,
         CancellationToken ct = default)
     {
         if (!IsInstalled())
-            return (false, "Cloudflare WARP (warp-cli) is not installed.", null);
+            return (false, "Cloudflare WARP (warp-cli) is not installed.", null, preferredProtocol);
+
+        if (!IsServiceRunning())
+            return (false, "Cloudflare WARP service is not running. Open the official WARP app once, then retry.", null, preferredProtocol);
 
         AcceptTos();
         Disconnect();
 
         if (!EnsureRegistration(progress))
-            return (false, "WARP registration failed. Open the official WARP app once, accept the ToS, then retry.", null);
+            return (false, "WARP registration failed. Open the official WARP app once, accept the ToS, then retry.", null, preferredProtocol);
 
         SetModeWarp();
         SetProtocol(preferredProtocol);
@@ -295,21 +302,23 @@ public static class WarpCli
         List<string> list = endpoints?.Where(e => !string.IsNullOrWhiteSpace(e)).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
                             ?? new List<string>();
 
-                // Empty list ⇒ Cloudflare default endpoint first, then MASQUE fallback.
+        // Empty list ⇒ Cloudflare default endpoint first, then MASQUE fallback.
         if (list.Count == 0)
         {
             progress?.Report($"Connecting with Cloudflare default endpoint ({preferredProtocol})…");
             ResetEndpoint();
-            if (await PollConnectedAsync(ct).ConfigureAwait(false))
-                return (true, $"Connected via default endpoint ({preferredProtocol}).", null);
+            if (await PollConnectedAsync(progress, ct).ConfigureAwait(false))
+                return (true, $"Connected via default endpoint ({preferredProtocol}).", null, preferredProtocol);
             progress?.Report("Default endpoint failed: " + ParseStatus(Status()));
         }
         else
         {
+            int n = 0;
             foreach (string endpoint in list)
             {
                 ct.ThrowIfCancellationRequested();
-                progress?.Report($"Trying endpoint {endpoint} ({preferredProtocol})…");
+                n++;
+                progress?.Report($"[{n}/{list.Count}] Trying {endpoint} ({preferredProtocol})…");
                 Disconnect();
                 Result setEp = SetEndpoint(endpoint);
                 if (!setEp.Ok)
@@ -318,8 +327,8 @@ public static class WarpCli
                     continue;
                 }
 
-                if (await PollConnectedAsync(ct).ConfigureAwait(false))
-                    return (true, $"Connected via {endpoint} ({preferredProtocol}).", endpoint);
+                if (await PollConnectedAsync(progress, ct).ConfigureAwait(false))
+                    return (true, $"Connected via {endpoint} ({preferredProtocol}).", endpoint, preferredProtocol);
 
                 string reason = ParseStatus(Status());
                 progress?.Report($"No connect on {endpoint}: {reason}");
@@ -334,29 +343,41 @@ public static class WarpCli
             ResetEndpoint();
             SetProtocol("MASQUE");
             SetMasqueOptions("h3-with-h2-fallback");
-            if (await PollConnectedAsync(ct).ConfigureAwait(false))
-                return (true, "Connected via default endpoint (MASQUE).", null);
+            if (await PollConnectedAsync(progress, ct).ConfigureAwait(false))
+                return (true, "Connected via default endpoint (MASQUE).", null, "MASQUE");
         }
 
-        return (false, "Could not connect. Your ISP may block WARP; try MASQUE, another endpoint, or another network.", null);
+        return (false, "Could not connect. Your ISP may block WARP; try MASQUE, another endpoint, or another network.", null, preferredProtocol);
     }
 
-    private static async Task<bool> PollConnectedAsync(CancellationToken ct)
+    private static async Task<bool> PollConnectedAsync(IProgress<string>? progress, CancellationToken ct)
     {
         Connect();
-        for (int i = 0; i < 8; i++)
+        // ~14s window; exit early on Failed / stable Disconnected.
+        for (int i = 0; i < 20; i++)
         {
             await Task.Delay(700, ct).ConfigureAwait(false);
             Result st = Status();
-            if (IsConnected(st)) return true;
             string parsed = ParseStatus(st);
             if (parsed.Contains("Failed", StringComparison.OrdinalIgnoreCase))
                 return false;
-            // Give the client a couple of polls before treating Disconnected as final.
-            if (i >= 2 && parsed.Contains("Disconnected", StringComparison.OrdinalIgnoreCase))
+            if (i >= 3 && parsed.Contains("Disconnected", StringComparison.OrdinalIgnoreCase))
                 return false;
+            if (parsed.Contains("Not connected", StringComparison.OrdinalIgnoreCase) && i >= 3)
+                return false;
+
+            if (!IsConnected(st)) continue;
+
+            // Confirm egress actually uses WARP (status alone can lie briefly).
+            PublicIpInfo info = await FetchPublicIpInfoAsync(5000).ConfigureAwait(false);
+            if (info.WarpOn == true)
+                return true;
+            if (info.WarpOn == false)
+                progress?.Report("warp-cli says Connected but trace shows warp=off — waiting…");
+            else if (i >= 8)
+                return true; // trace unreachable; trust status after enough Connected polls
         }
-        return IsConnected(Status());
+        return false;
     }
 
     public sealed class PublicIpInfo

@@ -17,7 +17,7 @@ DNS alone does not hide your IP. Remotes see the TCP/UDP source address.
 
 1. **Anti-sanction (Shecan):** `Rules_ShecanShelter_AntiSanction.txt` — websites/devtools.
 2. **Gaming Smart DNS:** `Rules_GamingSmartDns_ShelterRadar.txt` — edit in your game domains after checking Shelter/Radar coverage.
-3. Import via **Settings → Edit Rules** (GeoHide import dialog) or Tools → GeoHide WARP (Shecan button).
+3. Import via **Tools → GeoHide WARP** (Rules preset dropdown + Import into Rules).
 
 ## Path B — Cloudflare WARP (recommended, no VPS)
 

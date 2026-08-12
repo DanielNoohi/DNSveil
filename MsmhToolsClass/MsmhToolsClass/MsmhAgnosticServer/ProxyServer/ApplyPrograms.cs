@@ -54,9 +54,15 @@ public partial class MsmhAgnosticServer
                     req.ApplyFragment = IsFragmentActive;
                     req.ApplyChangeSNI = IsFakeSniActive;
                     if (!string.IsNullOrEmpty(rr.Sni) && !rr.Sni.Equals(req.AddressOrig)) req.AddressSNI = rr.Sni;
-                    if (rr.ApplyUpStreamProxy && !string.IsNullOrWhiteSpace(rr.ProxyScheme) &&
-                        !Endless.IsUpstreamEqualToServerAddress(rr.ProxyScheme))
+                    if (rr.ApplyUpStreamProxy && !string.IsNullOrWhiteSpace(rr.ProxyScheme))
                     {
+                        // Fail closed: a self-upstream loop would otherwise fall through as Direct (IP leak).
+                        if (Endless.IsUpstreamEqualToServerAddress(rr.ProxyScheme))
+                        {
+                            msgReqEvent += $"Upstream equals server: {req.Address}:{req.Port}, Request Denied.";
+                            OnRequestReceived?.Invoke(msgReqEvent, EventArgs.Empty);
+                            return null;
+                        }
                         req.ApplyUpstreamProxy = true;
                         req.ApplyUpstreamProxyToBlockedIPs = rr.ApplyUpStreamProxyToBlockedIPs;
                         req.UpstreamProxyScheme = rr.ProxyScheme;

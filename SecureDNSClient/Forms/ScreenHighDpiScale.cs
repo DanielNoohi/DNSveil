@@ -543,6 +543,13 @@ public partial class FormMain
             CustomButtonBenchmark.Left = CustomButtonToolsFlushDns.Left;
             CustomButtonBenchmark.Top = CustomButtonToolsFlushDns.Bottom + spaceV;
 
+            Control[] geoHideBtns = TabPageTools.Controls.Find("CustomButtonToolsGeoHideWarp", false);
+            if (geoHideBtns.Length > 0)
+            {
+                geoHideBtns[0].Left = CustomButtonBenchmark.Left;
+                geoHideBtns[0].Top = CustomButtonBenchmark.Bottom + spaceV;
+            }
+
             //// Settings
             int settingsMenuWidth = TextRenderer.MeasureText("MSMHSecureDNSClient", Font).Width;
             try

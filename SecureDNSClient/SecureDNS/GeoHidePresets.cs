@@ -93,15 +93,17 @@ public static class GeoHidePresets
         try
         {
             EnsureUserPresetsCopied();
-            string? path = ResolvePresetPath(kind);
+            string name = GetPresetFileName(kind);
+            // Prefer UserData customized preset when present; otherwise bundled/repo stock.
+            string userPath = Path.Combine(UserPresetsDir, name);
+            string bundled = Path.Combine(BundledPresetsDir, name);
+            string repo = Path.Combine(RepoPresetsDir, name);
+            string? path = null;
+            if (File.Exists(userPath)) path = userPath;
+            else if (File.Exists(bundled)) path = bundled;
+            else if (File.Exists(repo)) path = repo;
             if (path == null || !File.Exists(path))
                 return (false, "Preset file not found. Place presets under Assets/Presets next to the app or in UserData/Assets/Presets.");
-
-            // Prefer bundled/repo copy over a stale UserData copy when importing known presets.
-            string bundled = Path.Combine(BundledPresetsDir, GetPresetFileName(kind));
-            string repo = Path.Combine(RepoPresetsDir, GetPresetFileName(kind));
-            if (File.Exists(bundled)) path = bundled;
-            else if (File.Exists(repo)) path = repo;
 
             List<string> presetLines = new();
             await presetLines.LoadFromFileAsync(path, true, true);
@@ -133,11 +135,12 @@ public static class GeoHidePresets
             output.AddRange(presetLines);
             await File.WriteAllLinesAsync(SecureDNS.RulesPath, output, new UTF8Encoding(false));
 
-            // Keep UserData copy in sync with what we imported.
+            // Seed UserData from stock only when missing — never overwrite user edits.
             try
             {
                 Directory.CreateDirectory(UserPresetsDir);
-                File.Copy(path, Path.Combine(UserPresetsDir, Path.GetFileName(path)), overwrite: true);
+                if (!File.Exists(userPath) && (File.Exists(bundled) || File.Exists(repo)))
+                    File.Copy(File.Exists(bundled) ? bundled : repo, userPath, overwrite: false);
             }
             catch { /* ignore */ }
 
@@ -162,6 +165,7 @@ public static class GeoHidePresets
         "• Tools → GeoHide WARP: controls official warp-cli (like PyWarp).\n" +
         "• Connect WARP so remotes see a Cloudflare exit IP.\n" +
         "• Auto-find endpoint helps when ISPs block default WARP.\n" +
-        "• Shecan / gaming Smart DNS presets only cover listed domains.\n\n" +
+        "• Import Shecan / gaming / upstream-proxy presets from the GeoHide window.\n" +
+        "• After import, rules are re-applied to a running DNS/Share session when possible.\n\n" +
         "See Assets/Presets/README_WARP.md and README_GeoHide.md";
 }

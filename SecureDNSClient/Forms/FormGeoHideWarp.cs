@@ -16,23 +16,25 @@ public class FormGeoHideWarp : Form
     private readonly CustomLabel _lblIp = new();
     private readonly CustomComboBox _cmbEndpoint = new();
     private readonly CustomComboBox _cmbProtocol = new();
+    private readonly CustomComboBox _cmbPreset = new();
     private readonly CustomButton _btnRefresh = new();
     private readonly CustomButton _btnConnect = new();
     private readonly CustomButton _btnDisconnect = new();
     private readonly CustomButton _btnAuto = new();
     private readonly CustomButton _btnCancel = new();
     private readonly CustomButton _btnInstall = new();
-    private readonly CustomButton _btnShecan = new();
+    private readonly CustomButton _btnImportPreset = new();
+    private readonly CustomButton _btnHelp = new();
     private readonly CustomRichTextBox _log = new();
-    private readonly CustomCheckBox _chkShecan = new();
+    private readonly CustomCheckBox _chkImportAfterConnect = new();
     private CancellationTokenSource? _cts;
     private bool _busy;
 
     public FormGeoHideWarp()
     {
         Text = "GeoHide — Cloudflare WARP";
-        Width = 640;
-        Height = 540;
+        Width = 660;
+        Height = 560;
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -44,9 +46,10 @@ public class FormGeoHideWarp : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 6,
+            RowCount = 7,
             Padding = new Padding(12),
         };
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -58,8 +61,8 @@ public class FormGeoHideWarp : Form
         var help = new CustomLabel
         {
             AutoSize = true,
-            MaximumSize = new Size(600, 0),
-            Text = "Uses official Cloudflare WARP (warp-cli), like PyWarp. Connect so destinations see a Cloudflare exit IP — not your ISP. No VPS required. Encrypted DNS / Shecan alone cannot change your public IP."
+            MaximumSize = new Size(620, 0),
+            Text = "Uses official Cloudflare WARP (warp-cli), like PyWarp. Connect so destinations see a Cloudflare exit IP — not your ISP. Encrypted DNS / Shecan alone cannot change your public IP."
         };
         root.Controls.Add(help, 0, 0);
 
@@ -101,43 +104,65 @@ public class FormGeoHideWarp : Form
         StyleBtn(_btnAuto, "Auto-find endpoint", 140);
         StyleBtn(_btnCancel, "Cancel", 80);
         StyleBtn(_btnInstall, "Get WARP…", 100);
-        StyleBtn(_btnShecan, "Import Shecan rules", 150);
+        StyleBtn(_btnHelp, "Help", 70);
         _btnCancel.Enabled = false;
         _btnConnect.Click += async (_, _) => await ConnectAsync(auto: false);
         _btnDisconnect.Click += async (_, _) => await DisconnectAsync();
         _btnAuto.Click += async (_, _) => await ConnectAsync(auto: true);
         _btnCancel.Click += (_, _) => { try { _cts?.Cancel(); } catch { } };
         _btnInstall.Click += (_, _) => OpenLinks.OpenUrl("https://one.one.one.one/");
-        _btnShecan.Click += async (_, _) => await ImportShecanAsync();
-        _chkShecan.Text = "Also enable Shecan anti-sanction rules after connect";
-        _chkShecan.AutoSize = true;
-        _chkShecan.Checked = false; // off by default — avoids fighting WARP/Cloudflare DNS
+        _btnHelp.Click += (_, _) => CustomMessageBox.Show(this, GeoHidePresets.HelpSummary, "GeoHide help",
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
         rowBtn.Controls.Add(_btnConnect);
         rowBtn.Controls.Add(_btnDisconnect);
         rowBtn.Controls.Add(_btnAuto);
         rowBtn.Controls.Add(_btnCancel);
         rowBtn.Controls.Add(_btnInstall);
-        rowBtn.Controls.Add(_btnShecan);
-        rowBtn.Controls.Add(_chkShecan);
+        rowBtn.Controls.Add(_btnHelp);
         root.Controls.Add(rowBtn, 0, 3);
+
+        var rowPreset = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
+        var lblPreset = new CustomLabel { Text = "Rules preset", AutoSize = true, Margin = new Padding(0, 8, 8, 0) };
+        _cmbPreset.Size = new Size(260, 28);
+        _cmbPreset.DropDownStyle = ComboBoxStyle.DropDownList;
+        _cmbPreset.Items.AddRange(new object[]
+        {
+            "Shecan anti-sanction (web/dev)",
+            "Via upstream proxy",
+            "Gaming Smart DNS template"
+        });
+        _cmbPreset.SelectedIndex = 0;
+        StyleBtn(_btnImportPreset, "Import into Rules", 140);
+        _btnImportPreset.Click += async (_, _) => await ImportSelectedPresetAsync(silent: false);
+        _chkImportAfterConnect.Text = "Also import selected preset after successful connect";
+        _chkImportAfterConnect.AutoSize = true;
+        _chkImportAfterConnect.Checked = false;
+        rowPreset.Controls.Add(lblPreset);
+        rowPreset.Controls.Add(_cmbPreset);
+        rowPreset.Controls.Add(_btnImportPreset);
+        rowPreset.Controls.Add(_chkImportAfterConnect);
+        root.Controls.Add(rowPreset, 0, 4);
 
         _log.Dock = DockStyle.Fill;
         _log.ReadOnly = true;
-        root.Controls.Add(_log, 0, 4);
+        root.Controls.Add(_log, 0, 5);
 
         var foot = new CustomLabel
         {
             AutoSize = true,
-            MaximumSize = new Size(600, 0),
-            Text = "Inspired by PyWarp (warp-cli UI). Install Cloudflare WARP, close the official UI if it conflicts, then Connect here before using apps that must not see your ISP IP."
+            MaximumSize = new Size(620, 0),
+            Text = "Tip: after importing rules while DNS/Share is running, DNSveil re-applies them automatically. Keep WARP Connected while you need a Cloudflare exit IP."
         };
-        root.Controls.Add(foot, 0, 5);
+        root.Controls.Add(foot, 0, 6);
 
         Shown += async (_, _) =>
         {
-            Log(WarpCli.IsInstalled()
-                ? "warp-cli found."
-                : "warp-cli NOT found — click Get WARP… and install Cloudflare WARP.");
+            if (!WarpCli.IsInstalled())
+                Log("warp-cli NOT found — click Get WARP… and install Cloudflare WARP.");
+            else if (!WarpCli.IsServiceRunning())
+                Log("warp-cli found, but WARP service is not running — open the official WARP app once.");
+            else
+                Log("warp-cli found.");
             await RefreshStatusAsync();
         };
         FormClosing += (_, _) =>
@@ -147,6 +172,13 @@ public class FormGeoHideWarp : Form
             _cts = null;
         };
     }
+
+    private GeoHidePresets.PresetKind SelectedPresetKind() => _cmbPreset.SelectedIndex switch
+    {
+        1 => GeoHidePresets.PresetKind.ViaUpstreamProxy,
+        2 => GeoHidePresets.PresetKind.GamingSmartDns,
+        _ => GeoHidePresets.PresetKind.AntiSanctionShecanShelter
+    };
 
     private void ReloadEndpointList()
     {
@@ -193,10 +225,11 @@ public class FormGeoHideWarp : Form
         _btnDisconnect.Enabled = !busy;
         _btnAuto.Enabled = !busy;
         _btnRefresh.Enabled = !busy;
-        _btnShecan.Enabled = !busy;
+        _btnImportPreset.Enabled = !busy;
         _btnCancel.Enabled = busy;
         _cmbEndpoint.Enabled = !busy;
         _cmbProtocol.Enabled = !busy;
+        _cmbPreset.Enabled = !busy;
     }
 
     private async Task RefreshStatusAsync()
@@ -207,8 +240,11 @@ public class FormGeoHideWarp : Form
             _lblIp.Text = "Public IP: —";
             return;
         }
+        if (!WarpCli.IsServiceRunning())
+            _lblStatus.Text = "Status: WARP service not running";
         var st = await Task.Run(() => WarpCli.Status()).ConfigureAwait(true);
-        _lblStatus.Text = "Status: " + WarpCli.ParseStatus(st);
+        if (WarpCli.IsServiceRunning())
+            _lblStatus.Text = "Status: " + WarpCli.ParseStatus(st);
         var info = await WarpCli.FetchPublicIpInfoAsync().ConfigureAwait(true);
         string ipPart = info.Ip ?? "unavailable";
         string warpPart = info.WarpOn == true ? " (warp=on)" : info.WarpOn == false ? " (warp=off)" : "";
@@ -251,7 +287,7 @@ public class FormGeoHideWarp : Form
             IEnumerable<string>? endpoints;
             if (auto)
             {
-                endpoints = WarpCli.EnumerateEndpointCandidates(protocol, 24);
+                endpoints = WarpCli.EnumerateEndpointCandidates(protocol, 16);
                 Log("Auto-scanning endpoints (PyWarp-style)…");
             }
             else
@@ -259,7 +295,7 @@ public class FormGeoHideWarp : Form
                 string selected = _cmbEndpoint.Text.Trim();
                 if (string.IsNullOrEmpty(selected) || selected.StartsWith("("))
                 {
-                    endpoints = null; // default endpoint path inside WarpCli
+                    endpoints = null;
                     Log("Connecting with Cloudflare default endpoint…");
                 }
                 else
@@ -268,9 +304,15 @@ public class FormGeoHideWarp : Form
                 }
             }
 
-            var (ok, message, ep) = await WarpCli.TryConnectWithFallbackAsync(
+            var (ok, message, ep, usedProtocol) = await WarpCli.TryConnectWithFallbackAsync(
                 endpoints, protocol, progress, _cts.Token).ConfigureAwait(true);
             Log(message);
+            if (!string.IsNullOrEmpty(usedProtocol) &&
+                !usedProtocol.Equals(_cmbProtocol.SelectedItem?.ToString(), StringComparison.OrdinalIgnoreCase))
+            {
+                int idx = _cmbProtocol.Items.IndexOf(usedProtocol);
+                if (idx >= 0) _cmbProtocol.SelectedIndex = idx;
+            }
             if (ep != null)
             {
                 if (!_cmbEndpoint.Items.Contains(ep))
@@ -280,7 +322,8 @@ public class FormGeoHideWarp : Form
             await RefreshStatusAsync().ConfigureAwait(true);
             if (ok)
             {
-                if (_chkShecan.Checked) await ImportShecanAsync(silent: true).ConfigureAwait(true);
+                if (_chkImportAfterConnect.Checked)
+                    await ImportSelectedPresetAsync(silent: true).ConfigureAwait(true);
                 CustomMessageBox.Show(this,
                     message + "\n\nKeep WARP Connected while you need remotes to see the Cloudflare exit IP.",
                     "GeoHide", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -293,7 +336,15 @@ public class FormGeoHideWarp : Form
         catch (OperationCanceledException)
         {
             Log("Cancelled.");
-            try { await Task.Run(() => WarpCli.Disconnect()).ConfigureAwait(true); } catch { }
+            try
+            {
+                await Task.Run(() =>
+                {
+                    WarpCli.Disconnect();
+                    WarpCli.ResetEndpoint();
+                }).ConfigureAwait(true);
+            }
+            catch { }
         }
         catch (Exception ex)
         {
@@ -305,22 +356,22 @@ public class FormGeoHideWarp : Form
         }
     }
 
-    private async Task ImportShecanAsync(bool silent = false)
+    private async Task ImportSelectedPresetAsync(bool silent)
     {
         try
         {
-            var (ok, message) = await GeoHidePresets.ImportIntoRulesAsync(
-                GeoHidePresets.PresetKind.AntiSanctionShecanShelter, merge: true).ConfigureAwait(true);
+            var kind = SelectedPresetKind();
+            var (ok, message) = await GeoHidePresets.ImportIntoRulesAsync(kind, merge: true).ConfigureAwait(true);
             Log(message);
             if (Application.OpenForms["FormMain"] is FormMain main)
-                main.EnableRulesSetting();
+                await main.EnableRulesSettingAndReapplyAsync().ConfigureAwait(true);
             if (!silent)
                 CustomMessageBox.Show(this, message, ok ? "Rules" : "Rules error",
                     MessageBoxButtons.OK, ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
         }
         catch (Exception ex)
         {
-            Log("Shecan import: " + ex.Message);
+            Log("Preset import: " + ex.Message);
         }
     }
 }

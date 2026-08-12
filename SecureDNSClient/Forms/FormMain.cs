@@ -747,6 +747,33 @@ public partial class FormMain : Form
         }
     }
 
+    /// <summary>Enable Rules and push them to a running DNS / Share proxy so imports take effect immediately.</summary>
+    public async Task EnableRulesSettingAndReapplyAsync()
+    {
+        EnableRulesSetting();
+        try
+        {
+            if (IsConnected || IsConnecting)
+            {
+                bool ok = await ApplyRulesToDnsAsync(null).ConfigureAwait(true);
+                this.InvokeIt(() => CustomRichTextBoxLog.AppendText(
+                    ok ? $"GeoHide rules re-applied to DNS.{NL}" : $"GeoHide rules DNS re-apply failed.{NL}",
+                    ok ? Color.MediumSeaGreen : Color.IndianRed));
+            }
+            if (IsProxyActivated && !IsProxyActivating)
+            {
+                bool ok = await ApplyRulesToProxyAsync().ConfigureAwait(true);
+                this.InvokeIt(() => CustomRichTextBoxLog.AppendText(
+                    ok ? $"GeoHide rules re-applied to Share proxy.{NL}" : $"GeoHide rules proxy re-apply failed.{NL}",
+                    ok ? Color.MediumSeaGreen : Color.IndianRed));
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("EnableRulesSettingAndReapplyAsync: " + ex.Message);
+        }
+    }
+
     //============================== About
     private void CustomLabelAboutThis_Click(object sender, EventArgs e)
     {

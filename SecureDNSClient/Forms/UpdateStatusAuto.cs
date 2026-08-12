@@ -172,23 +172,21 @@ public partial class FormMain
 
     private async Task CheckUpdateAsync(bool showMsg = false)
     {
+        if (IsCheckingStarted) return;
+        if (IsCheckingForUpdate) return;
+        IsCheckingForUpdate = true;
         try
         {
-            if (IsCheckingStarted) return;
-            if (IsCheckingForUpdate) return;
-            if (showMsg) IsCheckingForUpdate = true;
-
             await UpdateBoolInternetStateAsync();
             if (!IsInternetOnline)
             {
-                IsCheckingForUpdate = false;
+                if (showMsg)
+                    CustomMessageBox.Show(this, "No Internet.", "Update", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            // Prefer this fork's update file, then upstream DNSveil, then legacy SecureDNSClient
+            // Fork-only update channel — never advertise upstream SDC versions as this fork's updates.
             string updateUrl = "https://raw.githubusercontent.com/DanielNoohi/DNSveil/main/update";
-            string updateUrlUpstream = "https://raw.githubusercontent.com/msasanmh/DNSveil/main/update";
-            string updateUrlFallback = "https://raw.githubusercontent.com/msasanmh/SecureDNSClient/main/update";
             string update = string.Empty;
             string labelUpdate = string.Empty;
             string downloadUrl = string.Empty;
@@ -201,45 +199,26 @@ public partial class FormMain
 
             try
             {
-                // Without System Proxy — require valid TLS (do not AllowInsecure)
-                Uri uri = new(updateUrl, UriKind.Absolute);
                 HttpRequest hr = new()
                 {
                     AllowAutoRedirect = true,
                     AllowInsecure = false,
                     TimeoutMS = 20000,
-                    URI = uri
+                    URI = new Uri(updateUrl, UriKind.Absolute)
                 };
                 HttpRequestResponse hrr = await HttpRequest.SendAsync(hr);
                 if (hrr.IsSuccess)
-                {
                     update = Encoding.UTF8.GetString(hrr.Data);
-                }
                 else
                 {
-                    foreach (string fallback in new[] { updateUrlUpstream, updateUrlFallback })
+                    // Retry fork URL via system proxy (do not fall back to upstream product).
+                    string systemProxyScheme = NetworkTool.GetSystemProxy();
+                    if (!string.IsNullOrWhiteSpace(systemProxyScheme))
                     {
-                        hr.URI = new Uri(fallback, UriKind.Absolute);
+                        hr.ProxyScheme = systemProxyScheme;
                         hrr = await HttpRequest.SendAsync(hr);
                         if (hrr.IsSuccess)
-                        {
                             update = Encoding.UTF8.GetString(hrr.Data);
-                            break;
-                        }
-                    }
-
-                    if (string.IsNullOrEmpty(update))
-                    {
-                        // With System Proxy
-                        string systemProxyScheme = NetworkTool.GetSystemProxy();
-                        if (!string.IsNullOrWhiteSpace(systemProxyScheme))
-                        {
-                            hr.URI = new Uri(updateUrl, UriKind.Absolute);
-                            hr.ProxyScheme = systemProxyScheme;
-                            hrr = await HttpRequest.SendAsync(hr);
-                            if (hrr.IsSuccess)
-                                update = Encoding.UTF8.GetString(hrr.Data);
-                        }
                     }
                 }
             }
@@ -255,23 +234,25 @@ public partial class FormMain
                 string[] split = update.Split('|');
                 if (split.Length != 2)
                 {
-                    IsCheckingForUpdate = false;
+                    if (showMsg)
+                        CustomMessageBox.Show(this, "Invalid update file.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
                 string newVersion = split[0].Trim();
                 string currentVersion = Info.GetAppInfo(Assembly.GetExecutingAssembly()).ProductVersion ?? "99.99.99";
                 downloadUrl = split[1].Trim();
-                if (string.IsNullOrEmpty(downloadUrl)) downloadUrl = "https://github.com/DanielNoohi/DNSveil/releases/latest";
+                if (string.IsNullOrEmpty(downloadUrl) ||
+                    !downloadUrl.Contains("DanielNoohi/DNSveil", StringComparison.OrdinalIgnoreCase))
+                    downloadUrl = "https://github.com/DanielNoohi/DNSveil/releases/latest";
 
                 int versionResult = Info.VersionCompare(newVersion, currentVersion);
                 if (versionResult == 1)
                 {
-                    // Link Label Check Update
                     labelUpdate = $"There is a new version v{newVersion}";
 
                     if (showMsg)
                     {
-                        string productName = Info.GetAppInfo(Assembly.GetExecutingAssembly()).ProductName ?? "Secure DNS Client";
+                        string productName = Info.GetAppInfo(Assembly.GetExecutingAssembly()).ProductName ?? "DNSveil";
 
                         string msg = $"There is a new version of {productName}{NL}";
                         msg += $"New version: {newVersion}, Current version: {currentVersion}{NL}";
@@ -283,7 +264,6 @@ public partial class FormMain
                 }
                 else
                 {
-                    // Link Label Check Update
                     labelUpdate = string.Empty;
 
                     if (showMsg)
@@ -304,7 +284,6 @@ public partial class FormMain
 
             if (string.IsNullOrEmpty(labelUpdate))
             {
-                // No Update
                 this.InvokeIt(() => CustomButtonCheckUpdate.Text = "Check Update");
                 this.InvokeIt(() => CustomButtonCheckUpdate.BackColor = BackColor);
             }
@@ -313,12 +292,14 @@ public partial class FormMain
                 this.InvokeIt(() => CustomButtonCheckUpdate.Text = "New Ver");
                 this.InvokeIt(() => CustomButtonCheckUpdate.BackColor = Color.MediumSeaGreen);
             }
-
-            IsCheckingForUpdate = false;
         }
         catch (Exception ex)
         {
             Debug.WriteLine("CheckUpdateAsync: " + ex.Message);
+        }
+        finally
+        {
+            IsCheckingForUpdate = false;
         }
     }
 
