@@ -126,7 +126,7 @@ public class FormGeoHideWarp : Form
 
         _chkCensorship.AutoSize = true;
         _chkCensorship.Location = new Point(12, 176);
-        _chkCensorship.Text = "Censorship mode (Iran) — IRCF + CF scan, MASQUE (needed under DPI)";
+        _chkCensorship.Text = "Censorship mode (Iran) — IRCF + CF scan (try WireGuard; use MASQUE if UDP is blocked)";
         _chkCensorship.ForeColor = Color.WhiteSmoke;
         _chkCensorship.BackColor = Color.Transparent;
         _chkCensorship.Checked = true;
@@ -223,18 +223,9 @@ public class FormGeoHideWarp : Form
 
     private void SyncOptionConflicts(bool fromUser)
     {
-        // Censorship needs MASQUE + DPI under Iranian filtering.
-        if (_chkCensorship.Checked)
-        {
-            if (_cmbProtocol.Items.Count > 0 &&
-                !string.Equals(_cmbProtocol.SelectedItem?.ToString(), "MASQUE", StringComparison.OrdinalIgnoreCase))
-                _cmbProtocol.SelectedIndex = 0;
-            if (fromUser && !_chkDpiAssist.Checked)
-                _chkDpiAssist.Checked = true;
-        }
-
-        // No real mutual exclusion: DPI runs only during handshake; low-latency applies after.
-        // WireGuard upgrade under censorship is slow/rarely works — kept off by default in ConnectAsync.
+        // Censorship pairs well with DPI assist; do NOT force MASQUE — user may prefer WireGuard.
+        if (_chkCensorship.Checked && fromUser && !_chkDpiAssist.Checked)
+            _chkDpiAssist.Checked = true;
     }
 
     private async Task RunStartupPreflightAsync()
@@ -251,12 +242,16 @@ public class FormGeoHideWarp : Form
         foreach (string n in report.Notes) Log(n);
         foreach (string w in report.Warnings) Log("WARN: " + w);
 
-        // Auto-tune options from geo
+        // Auto-tune options from geo — keep protocol choice (MASQUE vs WireGuard) as the user set it.
         if (report.LikelyIran)
         {
             _chkCensorship.Checked = true;
             _chkDpiAssist.Checked = true;
             SyncOptionConflicts(fromUser: false);
+            if (string.Equals(_cmbProtocol.SelectedItem?.ToString(), "WireGuard", StringComparison.OrdinalIgnoreCase))
+                Log("Iran detected — WireGuard selected. If UDP is blocked by DPI, switch Protocol to MASQUE.");
+            else
+                Log("Iran detected — MASQUE is usually more reliable under DPI; WireGuard is available in Protocol.");
         }
         else if (!report.AlreadyOnWarp && !string.IsNullOrEmpty(report.Loc))
         {
@@ -684,7 +679,12 @@ public class FormGeoHideWarp : Form
                 Log("Fast path: censorship off.");
 
             SyncOptionConflicts(fromUser: false);
-            string protocol = censorship ? "MASQUE" : (_cmbProtocol.SelectedItem?.ToString() ?? "MASQUE");
+            // Honor Protocol combo always — censorship no longer forces MASQUE.
+            string protocol = _cmbProtocol.SelectedItem?.ToString() ?? "MASQUE";
+            if (censorship && protocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase))
+                Log("Protocol: WireGuard (UDP). If connect fails under DPI, switch to MASQUE.");
+            else if (censorship)
+                Log("Protocol: MASQUE (TCP/H2 — usually best under Iranian DPI).");
 
             string selected = _cmbEndpoint.Text.Trim();
             bool hasSpecific = !string.IsNullOrEmpty(selected) && !selected.StartsWith("(");

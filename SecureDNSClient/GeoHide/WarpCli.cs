@@ -360,8 +360,7 @@ public static class WarpCli
         CancellationToken ct)
     {
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        bool preferMasque = preferredProtocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase)
-                            || opt.Enabled;
+        bool preferMasque = preferredProtocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase);
 
         // 1) Live IRCF community list (Iran-curated)
         progress?.Report("Fetching IRCF community endpoints…");
@@ -396,7 +395,7 @@ public static class WarpCli
         List<string> list = set.ToList();
         Shuffle(list);
 
-        // Put MASQUE :443 first when censorship mode is on
+        // Put preferred protocol's ports first
         if (preferMasque)
         {
             list = list
@@ -404,11 +403,22 @@ public static class WarpCli
                 .ThenBy(_ => Random.Shared.Next())
                 .ToList();
         }
+        else
+        {
+            list = list
+                .OrderBy(e =>
+                    e.EndsWith(":2408") ? 0 :
+                    e.EndsWith(":500") ? 1 :
+                    e.EndsWith(":4500") ? 2 : 3)
+                .ThenBy(_ => Random.Shared.Next())
+                .ToList();
+        }
 
         if (list.Count > opt.MaxCandidates)
             list = list.Take(opt.MaxCandidates).ToList();
 
-        progress?.Report($"Built {list.Count} censorship-resistant candidates.");
+        progress?.Report($"Built {list.Count} censorship-resistant candidates" +
+                         (preferMasque ? " (MASQUE ports)." : " (WireGuard UDP ports)."));
         return list;
     }
 
@@ -531,14 +541,20 @@ public static class WarpCli
             return (false, "WARP registration failed. Open the official WARP app once (or enable DPI assist), accept the ToS, then retry.", null, preferredProtocol);
         }
 
-        // Under censorship: prefer H2-only MASQUE. H3/QUIC flaps under Iranian DPI cause
-        // the "connection keeps dying / latency spikes" feeling; TCP+H2 is stickier with DPI fragment.
+        // Under censorship: high-timeouts help both MASQUE and WireGuard handshakes.
         if (censorship.Enabled)
         {
-            progress?.Report("Stability: high-timeouts ON + MASQUE h2-only (less QUIC flap under DPI)…");
+            progress?.Report(preferredProtocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase)
+                ? "Stability: high-timeouts ON (WireGuard UDP path)…"
+                : "Stability: high-timeouts ON + MASQUE h2-only (less QUIC flap under DPI)…");
             Result hi = Run("debug", "high-timeouts", "enable");
             WarpSessionLog.Step("mode", "high-timeouts enable",
-                new Dictionary<string, object?> { ["ok"] = hi.Ok, ["out"] = hi.Combined });
+                new Dictionary<string, object?>
+                {
+                    ["ok"] = hi.Ok,
+                    ["out"] = hi.Combined,
+                    ["protocol"] = preferredProtocol,
+                });
         }
 
         Result mode = SetModeWarp();
@@ -555,15 +571,19 @@ public static class WarpCli
         List<string> list = endpoints?.Where(e => !string.IsNullOrWhiteSpace(e)).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
                             ?? new List<string>();
 
-        // Smart reconnect: last 24h successes — try immediately before any IRCF/CIDR scan.
-        List<string> remembered = WarpSuccessCache.GetRecentEndpoints();
+        // Smart reconnect: last 24h successes for THIS protocol — try before full scan.
+        List<string> remembered = WarpSuccessCache.GetRecentEndpoints(protocol: preferredProtocol);
         if (remembered.Count > 0 && (censorship.Enabled || list.Count == 0))
         {
-            progress?.Report($"Fast path: {remembered.Count} remembered endpoint(s) from last 24h…");
+            progress?.Report($"Fast path: {remembered.Count} remembered {preferredProtocol} endpoint(s) from last 24h…");
             WarpSessionLog.Step("cache", $"fast-path {remembered.Count}",
-                new Dictionary<string, object?> { ["endpoints"] = string.Join(", ", remembered) });
+                new Dictionary<string, object?>
+                {
+                    ["endpoints"] = string.Join(", ", remembered),
+                    ["protocol"] = preferredProtocol,
+                });
 
-            string fastProto = censorship.Enabled ? "MASQUE" : preferredProtocol;
+            string fastProto = preferredProtocol;
             SetProtocol(fastProto);
             if (fastProto.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
                 SetMasqueOptions(censorship.Enabled ? "h2-only" : "h3-with-h2-fallback");
@@ -620,11 +640,12 @@ public static class WarpCli
             list = remembered.Concat(list).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         }
 
-        // Under censorship: MASQUE only in the main loop (fast). Optional WG upgrade happens after connect.
-        // Full WireGuard second pass was doubling Auto-find time with little gain under Iranian DPI.
-        string[] protocols = censorship.Enabled
-            ? new[] { "MASQUE" }
-            : new[] { preferredProtocol };
+        // Honor preferred protocol. Under censorship, MASQUE is recommended but WireGuard is tried when selected.
+        string[] protocols = preferredProtocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase)
+            ? new[] { "WireGuard" }
+            : censorship.Enabled
+                ? new[] { "MASQUE" }
+                : new[] { preferredProtocol };
 
         foreach (string protocol in protocols)
         {
@@ -809,20 +830,21 @@ public static class WarpCli
             }
         }
 
-        // Last resort without custom list
+        // Last resort without custom list — stay on preferred protocol (do not silently switch MASQUE↔WG).
         if (!censorship.Enabled || list.Count > 0)
         {
-            progress?.Report("Last resort: default endpoint + MASQUE…");
-            WarpSessionLog.Step("attempt", "last resort default MASQUE");
+            progress?.Report($"Last resort: default endpoint + {preferredProtocol}…");
+            WarpSessionLog.Step("attempt", "last resort default " + preferredProtocol);
             Disconnect();
             ResetEndpoint();
-            SetProtocol("MASQUE");
-            SetMasqueOptions(censorship.Enabled ? "h2-only" : "h3-with-h2-fallback");
+            SetProtocol(preferredProtocol);
+            if (preferredProtocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
+                SetMasqueOptions(censorship.Enabled ? "h2-only" : "h3-with-h2-fallback");
             if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: true).ConfigureAwait(false) &&
                 await StabilizeConnectedAsync(progress, ct).ConfigureAwait(false))
             {
                 var accepted = await QualifyOrRejectAsync(
-                    null, "MASQUE", censorship, progress, ct, WarpSessionLog.ElapsedMs, fromCache: false).ConfigureAwait(false);
+                    null, preferredProtocol, censorship, progress, ct, WarpSessionLog.ElapsedMs, fromCache: false).ConfigureAwait(false);
                 if (accepted != null) return accepted.Value;
             }
         }
@@ -830,12 +852,13 @@ public static class WarpCli
         if (censorship.DpiAssist) await WarpDpiAssist.StopAsync().ConfigureAwait(false);
 
         WarpSessionLog.Step("connect", "all attempts exhausted");
-        return (false,
-            "Could not connect under censorship. Tips: keep \"DPI assist\" on, try again (new CF IPs), " +
-            "or paste a working IP:443 from Clean IP Scanner / IRCF. " +
-            "If WARP IPs themselves are fully blocked, official warp-cli cannot fake MASQUE SNI — " +
-            "tools like usque/masque-plus with custom SNI may be required as a last resort.",
-            null, preferredProtocol);
+        string tip = preferredProtocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase)
+            ? "WireGuard (UDP) failed. Tip: switch Protocol to MASQUE — TCP/H2 usually works better under Iranian DPI."
+            : "Could not connect under censorship. Tips: keep \"DPI assist\" on, try again (new CF IPs), " +
+              "or paste a working IP:443 from Clean IP Scanner / IRCF. " +
+              "If WARP IPs themselves are fully blocked, official warp-cli cannot fake MASQUE SNI — " +
+              "tools like usque/masque-plus with custom SNI may be required as a last resort.";
+        return (false, tip, null, preferredProtocol);
     }
 
     /// <summary>

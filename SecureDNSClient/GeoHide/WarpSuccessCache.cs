@@ -44,10 +44,13 @@ public static class WarpSuccessCache
         }
     }
 
-    /// <summary>Endpoints only, newest first, distinct.</summary>
-    public static List<string> GetRecentEndpoints(TimeSpan? maxAge = null)
+    /// <summary>Endpoints only, newest first, distinct. Optionally filter by protocol (MASQUE / WireGuard).</summary>
+    public static List<string> GetRecentEndpoints(TimeSpan? maxAge = null, string? protocol = null)
     {
         return GetRecent(maxAge)
+            .Where(e =>
+                protocol == null ||
+                string.Equals(e.Protocol, protocol, StringComparison.OrdinalIgnoreCase))
             .Select(e => e.Endpoint.Trim())
             .Where(e => e.Length > 0)
             .Distinct(StringComparer.OrdinalIgnoreCase)

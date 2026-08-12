@@ -9,7 +9,7 @@
 
 A hardened fork of [msasanmh/DNSveil](https://github.com/msasanmh/DNSveil) (Secure DNS Client) with **GeoHide WARP**, Iran-aware connect paths, Smart DNS presets, and production-minded reliability work.
 
-**Latest:** [v3.5.10](https://github.com/DanielNoohi/DNSveil/releases/latest) · [Download portable x64](https://github.com/DanielNoohi/DNSveil/releases/latest)
+**Latest:** [v3.5.11](https://github.com/DanielNoohi/DNSveil/releases/latest) · [Download portable x64](https://github.com/DanielNoohi/DNSveil/releases/latest)
 
 ---
 
@@ -158,6 +158,7 @@ Recent work focuses on GeoHide reliability under censorship:
 
 | Version | Focus |
 |---------|--------|
+| **3.5.11** | Honor Protocol choice (WireGuard no longer forced to MASQUE); WG-only cache/scan when selected |
 | **3.5.10** | Robust link quality gate (RTT + download + soak); reject weak endpoints and try next; health watch auto-rotates on timeout |
 | **3.5.9** | Stability under DPI: MASQUE h2-only + high-timeouts; longer polls; settle checks; Iran excludes off by default (less jitter) |
 | **3.5.8** | Remembered endpoints (24h); modeless GeoHide (main window can minimize); stronger Iran detection; WARP DNS kept for site compatibility; Refresh button fix; new README |
