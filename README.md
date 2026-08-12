@@ -2,7 +2,7 @@
 
 Fork of [msasanmh/DNSveil](https://github.com/msasanmh/DNSveil) (formerly Secure DNS Client) with **GeoHide WARP**, Smart DNS rule presets, and related fixes.
 
-**Current release:** [v3.4.0](https://github.com/DanielNoohi/DNSveil/releases/tag/v3.4.0)
+**Current release:** [v3.4.1](https://github.com/DanielNoohi/DNSveil/releases/tag/v3.4.1)
 
 ![GitHub](https://img.shields.io/github/license/DanielNoohi/DNSveil)
 ![GitHub release](https://img.shields.io/github/v/release/DanielNoohi/DNSveil)
@@ -35,6 +35,11 @@ Then install [ASP.NET Core Runtime x86 v6.0.36](https://dotnet.microsoft.com/en-
 [This fork — latest release](https://github.com/DanielNoohi/DNSveil/releases/latest) · [Upstream releases](https://github.com/msasanmh/DNSveil/releases/latest)
 
 ---
+
+### What's new in this fork (v3.4.1)
+* **Bugfix:** Fake SNI / DPI bypass no longer breaks under the tightened TLS callback (name-mismatch allowed).
+* **GeoHide WARP:** safer `warp-cli` I/O, registration detection, connect polling, cancel, protocol-aware endpoints, `warp=on` IP status.
+* **Shecan preset:** removed Cloudflare/Google catch-alls that conflicted with WARP; Rules button no longer hijacked by GeoHide dialogs.
 
 ### What's new in this fork (v3.4.0)
 * **Tools → GeoHide WARP** — drive official Cloudflare WARP from the app (PyWarp-style `warp-cli`: endpoints, WireGuard/MASQUE, auto-find).
