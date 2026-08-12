@@ -90,6 +90,22 @@ public static class WarpSuccessCache
         }
     }
 
+    /// <summary>Drop a remembered endpoint that failed reconnect / settle (avoid sticky weak peers).</summary>
+    public static void Demote(string? endpoint)
+    {
+        if (string.IsNullOrWhiteSpace(endpoint)) return;
+        lock (Gate)
+        {
+            Store store = LoadUnlocked();
+            int removed = store.Entries.RemoveAll(e =>
+                string.Equals(e.Endpoint, endpoint, StringComparison.OrdinalIgnoreCase));
+            if (removed <= 0) return;
+            SaveUnlocked(store);
+            WarpSessionLog.Step("cache", $"demoted {endpoint}",
+                new Dictionary<string, object?> { ["removed"] = removed, ["count"] = store.Entries.Count });
+        }
+    }
+
     private static Store LoadUnlocked()
     {
         try

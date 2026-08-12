@@ -37,6 +37,10 @@ public class FormGeoHideWarp : Form
     private readonly CheckBox _chkLowLatency = new();
     private readonly CustomButton _btnMinimize = new();
     private CancellationTokenSource? _cts;
+    private CancellationTokenSource? _watchCts;
+    private string? _activeEndpoint;
+    private string _activeProtocol = "MASQUE";
+    private WarpCli.CensorshipOptions? _lastOpt;
     private bool _busy;
     private bool _reloadingEndpoints;
 
@@ -137,7 +141,7 @@ public class FormGeoHideWarp : Form
 
         _chkLowLatency.AutoSize = true;
         _chkLowLatency.Location = new Point(12, 224);
-        _chkLowLatency.Text = "Low latency (gaming) — Iran excludes + stop DPI (keeps WARP DNS so sites work)";
+        _chkLowLatency.Text = "Low latency — stop DPI after connect (keeps WARP DNS; Iran excludes off for stability)";
         _chkLowLatency.ForeColor = Color.WhiteSmoke;
         _chkLowLatency.BackColor = Color.Transparent;
         _chkLowLatency.Checked = true;
@@ -210,6 +214,7 @@ public class FormGeoHideWarp : Form
         };
         FormClosing += (_, _) =>
         {
+            StopLinkWatch();
             try { _cts?.Cancel(); } catch { }
             try { _cts?.Dispose(); } catch { }
             _cts = null;
@@ -424,6 +429,7 @@ public class FormGeoHideWarp : Form
     private async Task DisconnectAsync()
     {
         if (_busy) return;
+        StopLinkWatch();
         SetBusy(true);
         try
         {
@@ -432,6 +438,188 @@ public class FormGeoHideWarp : Form
             await RefreshStatusAsync().ConfigureAwait(true);
         }
         finally { SetBusy(false); }
+    }
+
+    private void StopLinkWatch()
+    {
+        try { _watchCts?.Cancel(); } catch { }
+        try { _watchCts?.Dispose(); } catch { }
+        _watchCts = null;
+        _activeEndpoint = null;
+    }
+
+    private void StartLinkWatch(string? endpoint, string protocol, WarpCli.CensorshipOptions opt)
+    {
+        StopLinkWatch();
+        _activeEndpoint = endpoint;
+        _activeProtocol = protocol;
+        _lastOpt = opt;
+        _watchCts = new CancellationTokenSource();
+        CancellationToken ct = _watchCts.Token;
+        _ = Task.Run(async () =>
+        {
+            try { await LinkWatchLoopAsync(ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                try
+                {
+                    if (!IsDisposed)
+                        BeginInvoke(() => Log("Health watch stopped: " + ex.Message));
+                }
+                catch { }
+            }
+        }, ct);
+        Log("Health watch started — will rotate endpoints if quality drops or times out.");
+    }
+
+    private async Task LinkWatchLoopAsync(CancellationToken ct)
+    {
+        int fails = 0;
+        // First check after ~25s — late DPI timeouts often show up here.
+        await Task.Delay(25_000, ct).ConfigureAwait(false);
+
+        while (!ct.IsCancellationRequested)
+        {
+            if (!WarpCli.IsConnected(WarpCli.Status()))
+            {
+                fails++;
+                UiLog($"Health: tunnel not Connected (fail {fails}/2).");
+            }
+            else
+            {
+                var progress = new Progress<string>(UiLog);
+                var q = await WarpLinkQuality.EvaluateHealthAsync(progress, ct).ConfigureAwait(false);
+                if (q.Ok)
+                {
+                    fails = 0;
+                    UiLog($"Health: OK (med={q.MedianRttMs}ms dl={q.DownloadMs}ms).");
+                }
+                else
+                {
+                    fails++;
+                    UiLog($"Health: WEAK — {q.Reason} (fail {fails}/2).");
+                }
+            }
+
+            if (fails >= 2)
+            {
+                fails = 0;
+                UiLog("Health: rotating to another address…");
+                await RotateFromWatchAsync().ConfigureAwait(false);
+                return; // RotateUi restarts a fresh watch on success
+            }
+
+            await Task.Delay(20_000, ct).ConfigureAwait(false);
+        }
+    }
+
+    private void UiLog(string msg)
+    {
+        try
+        {
+            if (IsDisposed) return;
+            if (InvokeRequired)
+            {
+                BeginInvoke(() => Log(msg));
+                return;
+            }
+            Log(msg);
+        }
+        catch { }
+    }
+
+    private async Task RotateFromWatchAsync()
+    {
+        if (_busy) return;
+        string? from = _activeEndpoint;
+        string proto = _activeProtocol;
+        var opt = _lastOpt ?? new WarpCli.CensorshipOptions
+        {
+            Enabled = true,
+            DpiAssist = false,
+            LowLatency = true,
+            RequireLinkQuality = true,
+            MaxConnectAttempts = 10,
+        };
+
+        var tcs = new TaskCompletionSource<bool>();
+        void Work() => _ = RotateUiAsync(from, proto, opt, tcs);
+        if (InvokeRequired) BeginInvoke(Work);
+        else Work();
+        await tcs.Task.ConfigureAwait(false);
+    }
+
+    private async Task RotateUiAsync(
+        string? from,
+        string proto,
+        WarpCli.CensorshipOptions opt,
+        TaskCompletionSource<bool> done)
+    {
+        if (_busy)
+        {
+            done.TrySetResult(false);
+            return;
+        }
+        SetBusy(true);
+        try
+        {
+            using var rotateCts = new CancellationTokenSource(TimeSpan.FromMinutes(4));
+            var progress = new Progress<string>(msg =>
+            {
+                Log(msg);
+                WarpSessionLog.Step("ui", msg);
+            });
+
+            WarpSessionLog.BeginSession("health-rotate",
+                new Dictionary<string, object?>
+                {
+                    ["from"] = from,
+                    ["protocol"] = proto,
+                });
+
+            var (ok, message, ep, usedProtocol) = await WarpCli.RotateToNextEndpointAsync(
+                from, proto, opt with { DpiAssist = false }, progress, rotateCts.Token).ConfigureAwait(true);
+
+            Log(message);
+            WarpSessionLog.End(ok, message,
+                new Dictionary<string, object?> { ["endpoint"] = ep, ["protocol"] = usedProtocol });
+
+            if (ok)
+            {
+                _activeEndpoint = ep;
+                _activeProtocol = usedProtocol;
+                if (ep != null)
+                {
+                    if (!_cmbEndpoint.Items.Contains(ep))
+                        _cmbEndpoint.Items.Insert(1, ep);
+                    _cmbEndpoint.Text = ep;
+                }
+                await RefreshStatusAsync().ConfigureAwait(true);
+                StartLinkWatch(ep, usedProtocol, opt);
+            }
+            else
+            {
+                Log("Failover failed — tunnel may be down. Press Connect to rescan.");
+                _activeEndpoint = null;
+            }
+            done.TrySetResult(ok);
+        }
+        catch (OperationCanceledException)
+        {
+            WarpSessionLog.End(false, "rotate cancelled");
+            done.TrySetResult(false);
+        }
+        catch (Exception ex)
+        {
+            Log("Rotate error: " + ex.Message);
+            WarpSessionLog.End(false, "rotate exception: " + ex.Message);
+            done.TrySetResult(false);
+        }
+        finally
+        {
+            SetBusy(false);
+        }
     }
 
     private async Task ConnectAsync()
@@ -447,6 +635,7 @@ public class FormGeoHideWarp : Form
         }
 
         SetBusy(true);
+        StopLinkWatch();
         _cts?.Dispose();
         _cts = new CancellationTokenSource();
         var progress = new Progress<string>(msg =>
@@ -521,12 +710,15 @@ public class FormGeoHideWarp : Form
                 DpiAssist = dpi,
                 LowLatency = lowLatency,
                 TryWireGuardUpgrade = false,
-                ApplyIranExcludes = lowLatency,
+                ApplyIranExcludes = false,
+                RequireLinkQuality = true,
                 MaxCandidates = censorship ? 48 : 24,
-                MaxConnectAttempts = censorship ? 8 : 6,
+                // More attempts: quality rejects should still leave room to try other addresses
+                MaxConnectAttempts = censorship ? 12 : 8,
                 CidrSamplePerRange = censorship ? 12 : 8,
                 ProbeTimeoutMs = 350,
             };
+            _lastOpt = opt;
 
             // One Connect path: censorship/empty → scan; otherwise use the Endpoint box.
             List<string>? endpointList;
@@ -534,7 +726,7 @@ public class FormGeoHideWarp : Form
             {
                 endpointList = null;
                 Log(censorship
-                    ? "Connect: scan IRCF/CF → probe → connect (requires warp=on)…"
+                    ? "Connect: scan → quality gate → failover if weak…"
                     : "Connecting with Cloudflare default…");
             }
             else
@@ -556,7 +748,7 @@ public class FormGeoHideWarp : Form
             if (!string.IsNullOrEmpty(WarpSessionLog.CurrentLogPath))
                 Log("Full diagnostics: " + WarpSessionLog.CurrentLogPath);
             if (!string.IsNullOrEmpty(usedProtocol) &&
-                !usedProtocol.Equals(_cmbProtocol.SelectedItem?.ToString(), StringComparison.OrdinalIgnoreCase))
+                !string.Equals(usedProtocol, _cmbProtocol.SelectedItem?.ToString(), StringComparison.OrdinalIgnoreCase))
             {
                 int idx = _cmbProtocol.Items.IndexOf(usedProtocol);
                 if (idx >= 0) _cmbProtocol.SelectedIndex = idx;
@@ -570,10 +762,11 @@ public class FormGeoHideWarp : Form
             await RefreshStatusAsync().ConfigureAwait(true);
             if (ok)
             {
+                StartLinkWatch(ep, usedProtocol, opt);
                 if (_chkImportAfterConnect.Checked)
                     await ImportSelectedPresetAsync(silent: true).ConfigureAwait(true);
                 CustomMessageBox.Show(this,
-                    message + "\n\nMinimize anytime — WARP stays connected.\n\nLog: " +
+                    message + "\n\nHealth watch is on — weak/timeout links auto-rotate to other addresses.\nMinimize anytime — WARP stays connected.\n\nLog: " +
                     (WarpSessionLog.CurrentLogPath ?? "(see UserData/GeoHideLogs)"),
                     "GeoHide", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
