@@ -114,32 +114,26 @@ public class FormGeoHideWarp : Form
 
         _chkCensorship.AutoSize = true;
         _chkCensorship.Location = new Point(12, 162);
-        _chkCensorship.Text = "Censorship mode (Iran) — IRCF + CF clean-IP scan, MASQUE/H2 first";
+        _chkCensorship.Text = "Censorship mode (Iran) — IRCF + CF scan, MASQUE (needed under DPI)";
         _chkCensorship.ForeColor = Color.WhiteSmoke;
         _chkCensorship.BackColor = Color.Transparent;
         _chkCensorship.Checked = true;
-        _chkCensorship.CheckedChanged += (_, _) =>
-        {
-            if (_chkCensorship.Checked)
-            {
-                _chkDpiAssist.Checked = true;
-                if (_cmbProtocol.Items.Count > 0) _cmbProtocol.SelectedIndex = 0; // MASQUE
-            }
-        };
+        _chkCensorship.CheckedChanged += (_, _) => SyncOptionConflicts(fromUser: true);
 
         _chkDpiAssist.AutoSize = true;
         _chkDpiAssist.Location = new Point(12, 186);
-        _chkDpiAssist.Text = "DPI assist (GoodbyeDPI TLS fragment — stopped after connect)";
+        _chkDpiAssist.Text = "DPI assist — GoodbyeDPI only during connect (auto-stopped after)";
         _chkDpiAssist.ForeColor = Color.WhiteSmoke;
         _chkDpiAssist.BackColor = Color.Transparent;
         _chkDpiAssist.Checked = true;
 
         _chkLowLatency.AutoSize = true;
         _chkLowLatency.Location = new Point(12, 210);
-        _chkLowLatency.Text = "Low latency (gaming) — tunnel_only DNS, WG upgrade, exclude Iran ranges";
+        _chkLowLatency.Text = "Low latency (gaming) — tunnel_only DNS + Iran excludes (no slow WG retry)";
         _chkLowLatency.ForeColor = Color.WhiteSmoke;
         _chkLowLatency.BackColor = Color.Transparent;
         _chkLowLatency.Checked = true;
+        _chkLowLatency.CheckedChanged += (_, _) => SyncOptionConflicts(fromUser: true);
 
         _lblPreset.AutoSize = true;
         _lblPreset.Location = new Point(12, 242);
@@ -177,7 +171,7 @@ public class FormGeoHideWarp : Form
         _lblFoot.AutoSize = false;
         _lblFoot.Location = new Point(12, 538);
         _lblFoot.Size = new Size(616, 44);
-        _lblFoot.Text = "After connect: use Minimize (title bar or button) — WARP stays up. Low-latency stops DPI assist and keeps Iran traffic off the tunnel.";
+        _lblFoot.Text = "Preflight checks Iran IP / other VPNs and starts CloudflareWARP if stopped. Options are complementary: DPI only for handshake; low-latency after connect.";
 
         Controls.AddRange(new Control[]
         {
@@ -200,16 +194,11 @@ public class FormGeoHideWarp : Form
 
         ResumeLayout(true);
         ReloadEndpointList();
+        SyncOptionConflicts(fromUser: false);
 
         Shown += async (_, _) =>
         {
-            if (!WarpCli.IsInstalled())
-                Log("warp-cli NOT found — click Get WARP… and install Cloudflare WARP.");
-            else if (!WarpCli.IsServiceRunning())
-                Log("warp-cli found, but WARP service is not running — open the official WARP app once.");
-            else
-                Log("warp-cli found. Censorship mode ON — use Auto-find.");
-            await RefreshStatusAsync();
+            await RunStartupPreflightAsync().ConfigureAwait(true);
         };
         FormClosing += (_, _) =>
         {
@@ -217,6 +206,60 @@ public class FormGeoHideWarp : Form
             try { _cts?.Dispose(); } catch { }
             _cts = null;
         };
+    }
+
+    private void SyncOptionConflicts(bool fromUser)
+    {
+        // Censorship needs MASQUE + DPI under Iranian filtering.
+        if (_chkCensorship.Checked)
+        {
+            if (_cmbProtocol.Items.Count > 0 &&
+                !string.Equals(_cmbProtocol.SelectedItem?.ToString(), "MASQUE", StringComparison.OrdinalIgnoreCase))
+                _cmbProtocol.SelectedIndex = 0;
+            if (fromUser && !_chkDpiAssist.Checked)
+                _chkDpiAssist.Checked = true;
+        }
+
+        // No real mutual exclusion: DPI runs only during handshake; low-latency applies after.
+        // WireGuard upgrade under censorship is slow/rarely works — kept off by default in ConnectAsync.
+    }
+
+    private async Task RunStartupPreflightAsync()
+    {
+        if (!WarpCli.IsInstalled())
+        {
+            Log("warp-cli NOT found — click Get WARP… and install Cloudflare WARP.");
+            await RefreshStatusAsync().ConfigureAwait(true);
+            return;
+        }
+
+        Log("Running preflight (service / Iran IP / VPN conflict)…");
+        var report = await WarpPreflight.RunAsync(new Progress<string>(Log)).ConfigureAwait(true);
+        foreach (string n in report.Notes) Log(n);
+        foreach (string w in report.Warnings) Log("WARN: " + w);
+
+        // Auto-tune options from geo
+        if (report.LikelyIran)
+        {
+            _chkCensorship.Checked = true;
+            _chkDpiAssist.Checked = true;
+            SyncOptionConflicts(fromUser: false);
+        }
+        else if (!report.AlreadyOnWarp && !string.IsNullOrEmpty(report.Loc))
+        {
+            // Outside IR and not on WARP — censorship scan is unnecessary overhead
+            Log("Tip: not in IR — uncheck Censorship mode for a much faster Connect.");
+        }
+
+        if (report.OtherVpnLikely)
+        {
+            CustomMessageBox.Show(this,
+                "Another VPN/tunnel appears active (" + report.OtherVpnHint + ").\n\n" +
+                "Disconnect it before GeoHide Auto-find, or WARP will fight it (slow/fail/high latency).",
+                "VPN conflict", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
+        await RefreshStatusAsync().ConfigureAwait(true);
     }
 
     private static void StyleCombo(ComboBox c)
@@ -350,45 +393,75 @@ public class FormGeoHideWarp : Form
         var progress = new Progress<string>(Log);
         try
         {
-            string protocol = _cmbProtocol.SelectedItem?.ToString() ?? "MASQUE";
-            bool censorship = _chkCensorship.Checked || auto; // Auto-find always uses censorship path
+            // Fresh preflight every connect — start service, warn on VPN / existing WARP
+            var pre = await WarpPreflight.RunAsync(progress, _cts.Token).ConfigureAwait(true);
+            foreach (string w in pre.Warnings) Log("WARN: " + w);
+
+            if (!pre.ServiceRunning)
+            {
+                CustomMessageBox.Show(this, pre.Warnings.FirstOrDefault() ?? "WARP service not running.",
+                    "WARP service", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (pre.OtherVpnLikely)
+            {
+                var dr = CustomMessageBox.Show(this,
+                    "Another VPN/tunnel looks active (" + pre.OtherVpnHint + ").\n\n" +
+                    "Continue anyway? (usually causes conflicts)",
+                    "VPN conflict", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                if (dr != DialogResult.Yes) return;
+            }
+
+            if (pre.AlreadyOnWarp)
+                Log("Already on WARP — will disconnect and reconnect with GeoHide settings.");
+
+            // Option conflict resolution for this attempt
+            bool censorship = _chkCensorship.Checked || auto;
             bool dpi = _chkDpiAssist.Checked;
+            bool lowLatency = _chkLowLatency.Checked;
+
+            // If user is in Iran, force censorship path for Auto-find
+            if (auto && pre.LikelyIran)
+            {
+                censorship = true;
+                dpi = true;
+            }
+
+            // Outside Iran + not censorship: skip heavy scan
+            if (!censorship && !pre.LikelyIran)
+                Log("Fast path: censorship off.");
+
+            SyncOptionConflicts(fromUser: false);
+            string protocol = censorship ? "MASQUE" : (_cmbProtocol.SelectedItem?.ToString() ?? "MASQUE");
 
             var opt = new WarpCli.CensorshipOptions
             {
                 Enabled = censorship,
                 DpiAssist = dpi,
-                LowLatency = _chkLowLatency.Checked,
-                MaxCandidates = censorship ? 120 : 32,
-                MaxConnectAttempts = censorship ? 20 : 12,
-                CidrSamplePerRange = censorship ? 56 : 16,
+                LowLatency = lowLatency,
+                // WG upgrade under DPI rarely works and made Auto-find feel stuck — off by default
+                TryWireGuardUpgrade = false,
+                ApplyIranExcludes = lowLatency,
+                MaxCandidates = censorship ? 48 : 24,
+                MaxConnectAttempts = censorship ? 8 : 6,
+                CidrSamplePerRange = censorship ? 12 : 8,
+                ProbeTimeoutMs = 350,
             };
 
             IEnumerable<string>? endpoints;
             if (auto)
             {
-                endpoints = null; // BuildCensorshipCandidatesAsync inside TryConnect
-                Log(censorship
-                    ? "Auto-find (censorship): DPI assist → MASQUE/H2 → IRCF + CF CIDR scan…"
-                    : "Auto-scanning endpoints…");
+                endpoints = null;
+                Log("Auto-find (fast): service OK → DPI → MASQUE IRCF/CF probe → connect…");
             }
             else
             {
                 string selected = _cmbEndpoint.Text.Trim();
                 if (string.IsNullOrEmpty(selected) || selected.StartsWith("("))
                 {
-                    endpoints = censorship ? null : Array.Empty<string>().AsEnumerable();
-                    // empty list with censorship=false uses default; with censorship=true builds candidates
-                    if (censorship)
-                    {
-                        endpoints = null;
-                        Log("Connect (censorship): scanning clean endpoints…");
-                    }
-                    else
-                    {
-                        endpoints = Array.Empty<string>();
-                        Log("Connecting with Cloudflare default endpoint…");
-                    }
+                    endpoints = censorship ? null : new List<string>();
+                    Log(censorship ? "Connect (censorship scan)…" : "Connecting with Cloudflare default…");
                 }
                 else
                 {
@@ -396,13 +469,9 @@ public class FormGeoHideWarp : Form
                 }
             }
 
-            // Empty enumerable vs null: TryConnect treats null/empty differently when censorship on.
-            // Pass null to trigger candidate build when censorship and no explicit endpoint.
             List<string>? endpointList = endpoints?.ToList();
-            if (censorship && (endpointList == null || endpointList.Count == 0) && auto)
+            if (censorship && (endpointList == null || endpointList.Count == 0))
                 endpointList = null;
-            else if (!censorship && endpointList != null && endpointList.Count == 0)
-                endpointList = new List<string>(); // empty → default endpoint path
 
             var (ok, message, ep, usedProtocol) = await WarpCli.TryConnectWithFallbackAsync(
                 endpointList, protocol, progress, _cts.Token, opt).ConfigureAwait(true);
@@ -425,8 +494,7 @@ public class FormGeoHideWarp : Form
                 if (_chkImportAfterConnect.Checked)
                     await ImportSelectedPresetAsync(silent: true).ConfigureAwait(true);
                 CustomMessageBox.Show(this,
-                    message + "\n\nMinimize this window anytime — WARP stays connected.\n" +
-                    "For gaming keep \"Low latency\" checked (stops DPI assist after connect).",
+                    message + "\n\nMinimize anytime — WARP stays connected.",
                     "GeoHide", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             else
@@ -444,6 +512,7 @@ public class FormGeoHideWarp : Form
                     WarpCli.Disconnect();
                     WarpCli.ResetEndpoint();
                 }).ConfigureAwait(true);
+                await WarpDpiAssist.StopAsync().ConfigureAwait(true);
             }
             catch { }
         }

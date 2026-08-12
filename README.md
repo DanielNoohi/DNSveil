@@ -2,7 +2,7 @@
 
 Fork of [msasanmh/DNSveil](https://github.com/msasanmh/DNSveil) (formerly Secure DNS Client) with **GeoHide WARP**, Smart DNS rule presets, and related fixes.
 
-**Current release:** [v3.5.4](https://github.com/DanielNoohi/DNSveil/releases/tag/v3.5.4)
+**Current release:** [v3.5.5](https://github.com/DanielNoohi/DNSveil/releases/tag/v3.5.5)
 
 ![GitHub](https://img.shields.io/github/license/DanielNoohi/DNSveil)
 ![GitHub release](https://img.shields.io/github/v/release/DanielNoohi/DNSveil)
@@ -35,6 +35,11 @@ Then install [ASP.NET Core Runtime x86 v6.0.36](https://dotnet.microsoft.com/en-
 [This fork â€” latest release](https://github.com/DanielNoohi/DNSveil/releases/latest) Â· [Upstream releases](https://github.com/msasanmh/DNSveil/releases/latest)
 
 ---
+
+### What's new in this fork (v3.5.5)
+* **Faster Auto-find:** fewer candidates/attempts, MASQUE-only scan (no slow WG second pass), Iran excludes cached once, no WG upgrade by default.
+* **Preflight:** detects Iran IP / existing WARP / other VPN adapters; warns on conflicts; auto-starts `CloudflareWARP` service if stopped.
+* **Option clarity:** DPI assist only during handshake; low-latency after connect — complementary, not conflicting.
 
 ### What's new in this fork (v3.5.4)
 * **GeoHide minimize:** title-bar minimize + Minimize button (dialog could not minimize before).

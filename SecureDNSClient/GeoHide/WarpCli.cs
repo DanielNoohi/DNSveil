@@ -91,13 +91,17 @@ public static class WarpCli
         public bool DpiAssist { get; init; } = true;
         /// <summary>
         /// After connect: stop DPI assist, prefer tunnel_only (DNSveil owns DNS),
-        /// try WireGuard upgrade, exclude domestic IR ranges from the tunnel.
+        /// optional WireGuard upgrade, exclude domestic IR ranges from the tunnel.
         /// </summary>
         public bool LowLatency { get; init; } = true;
-        public int MaxCandidates { get; init; } = 96;
-        public int MaxConnectAttempts { get; init; } = 18;
-        public int ProbeTimeoutMs { get; init; } = 500;
-        public int CidrSamplePerRange { get; init; } = 48;
+        /// <summary>When false, skip WireGuard upgrade (saves ~10–30s under DPI).</summary>
+        public bool TryWireGuardUpgrade { get; init; } = false;
+        /// <summary>When false, skip applying dozens of Iran exclude ranges (already private excludes exist).</summary>
+        public bool ApplyIranExcludes { get; init; } = true;
+        public int MaxCandidates { get; init; } = 48;
+        public int MaxConnectAttempts { get; init; } = 8;
+        public int ProbeTimeoutMs { get; init; } = 400;
+        public int CidrSamplePerRange { get; init; } = 16;
     }
 
     public static string? FindExecutable(bool forceRefresh = false)
@@ -453,8 +457,10 @@ public static class WarpCli
         if (!IsInstalled())
             return (false, "Cloudflare WARP (warp-cli) is not installed.", null, preferredProtocol);
 
-        if (!IsServiceRunning())
-            return (false, "Cloudflare WARP service is not running. Open the official WARP app once, then retry.", null, preferredProtocol);
+        // Ensure Windows service is up (auto-start if stopped).
+        var (svcOk, svcMsg, _) = await WarpPreflight.EnsureWarpServiceAsync(progress, ct).ConfigureAwait(false);
+        if (!svcOk)
+            return (false, svcMsg, null, preferredProtocol);
 
         // DPI assist first — fragment TLS ClientHello so engage/MASQUE H2 is not RST'd on SNI.
         if (censorship.DpiAssist)
@@ -494,12 +500,10 @@ public static class WarpCli
             list = await BuildCensorshipCandidatesAsync(preferredProtocol, censorship, progress, ct).ConfigureAwait(false);
         }
 
-        // Protocol order under censorship: MASQUE (H2 TCP fallback) first, then WireGuard.
-        // Low-latency still starts MASQUE for censorship, then upgrades to WG after connect.
+        // Under censorship: MASQUE only in the main loop (fast). Optional WG upgrade happens after connect.
+        // Full WireGuard second pass was doubling Auto-find time with little gain under Iranian DPI.
         string[] protocols = censorship.Enabled
-            ? (preferredProtocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase)
-                ? new[] { "MASQUE", "WireGuard" }
-                : new[] { "MASQUE", preferredProtocol, "WireGuard" }.Distinct(StringComparer.OrdinalIgnoreCase).ToArray())
+            ? new[] { "MASQUE" }
             : new[] { preferredProtocol };
 
         foreach (string protocol in protocols)
@@ -543,7 +547,7 @@ public static class WarpCli
             if (reachable.Count == 0)
             {
                 progress?.Report("Probe found nothing — trying IRCF/seed top entries anyway…");
-                reachable = tryList.Take(censorship.Enabled ? 12 : 8).ToList();
+                reachable = tryList.Take(censorship.Enabled ? 6 : 8).ToList();
             }
             else
             {
@@ -629,11 +633,12 @@ public static class WarpCli
 
         if (opt.LowLatency)
         {
-            // Ensure tunnel_only after connect (reconnect-safe).
             SetModeTunnelOnly();
             Run("debug", "high-timeouts", "disable");
 
-            if (protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
+            // WG upgrade is optional — under Iranian DPI it often fails and wastes 15–40s.
+            if (opt.TryWireGuardUpgrade &&
+                protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
             {
                 var upgraded = await TryUpgradeToWireGuardAsync(endpoint, progress, ct).ConfigureAwait(false);
                 if (upgraded.Ok)
@@ -648,8 +653,12 @@ public static class WarpCli
                 }
             }
 
-            progress?.Report("Excluding Iran/domestic ranges from tunnel (local traffic stays direct)…");
-            ApplyDomesticSplitTunnelExcludes(progress);
+            if (opt.ApplyIranExcludes)
+            {
+                progress?.Report("Excluding Iran/domestic ranges from tunnel (cached after first run)…");
+                await Task.Run(() => ApplyDomesticSplitTunnelExcludes(progress), ct).ConfigureAwait(false);
+            }
+
             message += " Low-latency profile applied.";
         }
 
@@ -670,7 +679,7 @@ public static class WarpCli
                 : "engage.cloudflareclient.com";
         }
 
-        int[] ports = { 2408, 500, 4500, 1701, 878, 894 };
+        int[] ports = { 2408, 500 }; // keep short — full port sweep was a major Auto-find delay
         foreach (int port in ports)
         {
             ct.ThrowIfCancellationRequested();
@@ -682,7 +691,7 @@ public static class WarpCli
             if (!set.Ok) continue;
             if (!await PollConnectedAsync(progress, verifyWarpOn: false, ct, longPoll: false).ConfigureAwait(false))
                 continue;
-            PublicIpInfo info = await FetchPublicIpInfoAsync(4000).ConfigureAwait(false);
+            PublicIpInfo info = await FetchPublicIpInfoAsync(3000).ConfigureAwait(false);
             if (info.WarpOn != false)
                 return (true, ep);
         }
@@ -699,40 +708,30 @@ public static class WarpCli
         await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: true).ConfigureAwait(false);
         return (false, null);
     }
+    private static bool _iranExcludesApplied;
 
     /// <summary>
-    /// Keep Iranian / private traffic off WARP so only foreign destinations (games servers) use the tunnel.
+    /// Keep Iranian / private traffic off WARP so only foreign destinations (game servers) use the tunnel.
+    /// Runs once per process — re-applying 80+ ranges was a major post-connect stall.
     /// </summary>
     public static void ApplyDomesticSplitTunnelExcludes(IProgress<string>? progress = null)
     {
-        // Compact major Iran + private ranges (exclude = leave tunnel). Already-present ranges are fine.
+        if (_iranExcludesApplied)
+        {
+            progress?.Report("Iran/domestic excludes already applied this session.");
+            return;
+        }
+
+        // Fewer large aggregates (speed) — private RFC1918 + major IR blocks
         string[] ranges =
         {
             "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
-            // Large Iran allocations (RIPE / common lists) — domestic stays on ISP path
-            "2.144.0.0/14", "5.52.0.0/16", "5.104.0.0/16", "5.160.0.0/16", "5.201.0.0/16",
-            "5.202.0.0/16", "5.208.0.0/12", "5.232.0.0/14", "31.2.128.0/17", "31.7.64.0/18",
-            "31.14.144.0/20", "31.24.0.0/16", "31.56.0.0/14", "37.9.0.0/16", "37.32.0.0/16",
-            "37.98.0.0/16", "37.148.0.0/16", "37.156.0.0/16", "45.82.0.0/16", "46.32.0.0/16",
-            "46.100.0.0/16", "46.209.0.0/16", "62.60.128.0/17", "62.102.128.0/17", "62.220.96.0/19",
-            "78.38.0.0/15", "79.127.0.0/16", "80.191.0.0/16", "81.12.0.0/16", "81.31.160.0/19",
-            "82.99.192.0/18", "83.147.192.0/18", "84.241.0.0/17", "85.133.128.0/17", "85.185.0.0/16",
-            "86.55.0.0/16", "89.32.0.0/16", "89.165.0.0/16", "89.198.0.0/16", "91.98.0.0/15",
-            "91.133.0.0/16", "92.42.48.0/20", "92.114.16.0/20", "93.110.0.0/16", "94.74.128.0/17",
-            "94.182.0.0/15", "95.38.0.0/16", "95.82.0.0/16", "109.74.224.0/19", "109.110.160.0/19",
-            "109.122.192.0/18", "151.232.0.0/14", "151.238.0.0/15", "158.58.0.0/16", "159.20.64.0/18",
-            "164.138.0.0/16", "176.65.192.0/18", "178.21.40.0/21", "178.22.72.0/21", "178.131.0.0/16",
-            "178.157.0.0/16", "178.173.128.0/17", "178.216.0.0/16", "178.236.32.0/20", "178.251.208.0/20",
-            "185.4.0.0/16", "185.8.172.0/22", "185.10.72.0/22", "185.55.224.0/22", "185.73.76.0/22",
-            "185.80.196.0/22", "185.94.96.0/22", "185.105.236.0/22", "185.112.32.0/22", "185.120.200.0/22",
-            "185.141.48.0/22", "185.160.104.0/22", "185.161.48.0/22", "185.164.72.0/22", "185.167.72.0/22",
-            "185.176.32.0/22", "185.177.156.0/22", "185.178.220.0/22", "185.180.128.0/22", "185.192.112.0/22",
-            "185.204.180.0/22", "185.208.172.0/22", "185.213.164.0/22", "188.34.0.0/16", "188.75.0.0/16",
-            "188.121.96.0/19", "188.136.128.0/17", "188.158.0.0/16", "188.191.176.0/20", "188.209.0.0/16",
-            "188.210.64.0/18", "188.211.0.0/16", "188.212.48.0/20", "188.213.64.0/18", "188.245.0.0/16",
-            "193.176.240.0/20", "194.33.104.0/22", "194.36.0.0/16", "194.225.0.0/16", "195.146.32.0/19",
-            "212.16.64.0/19", "212.33.192.0/19", "212.80.0.0/16", "213.176.64.0/18", "213.207.192.0/18",
-            "217.11.16.0/20", "217.66.192.0/18", "217.172.96.0/19", "217.218.0.0/15",
+            "2.144.0.0/14", "5.208.0.0/12", "5.232.0.0/14", "31.56.0.0/14",
+            "37.156.0.0/14", "46.209.0.0/16", "78.38.0.0/15", "79.127.0.0/16",
+            "81.12.0.0/16", "85.185.0.0/16", "89.198.0.0/16", "91.98.0.0/15",
+            "94.182.0.0/15", "95.38.0.0/16", "151.232.0.0/14", "151.238.0.0/15",
+            "176.65.192.0/18", "178.131.0.0/16", "185.4.0.0/16", "188.209.0.0/16",
+            "188.245.0.0/16", "194.225.0.0/16", "217.218.0.0/15",
         };
 
         int ok = 0;
@@ -742,6 +741,7 @@ public static class WarpCli
             if (r.Ok || r.Combined.Contains("already", StringComparison.OrdinalIgnoreCase))
                 ok++;
         }
+        _iranExcludesApplied = true;
         progress?.Report($"Split-tunnel excludes applied ({ok}/{ranges.Length} ranges).");
     }
 
