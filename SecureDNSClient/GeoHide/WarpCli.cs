@@ -90,8 +90,8 @@ public static class WarpCli
         /// <summary>Start GoodbyeDPI TLS fragment before connect (GFW-knocker style).</summary>
         public bool DpiAssist { get; init; } = true;
         /// <summary>
-        /// Before connect: tunnel_only (DNSveil owns DNS). After connect: stop DPI assist,
-        /// optional WireGuard upgrade, soft Iran excludes — never re-flip mode (that drops tunnels).
+        /// After connect: stop DPI assist, exclude IR domestic ranges from the tunnel.
+        /// Uses WARP DNS mode (not tunnel_only) so YouTube/X and similar sites resolve correctly.
         /// </summary>
         public bool LowLatency { get; init; } = true;
         /// <summary>When false, skip WireGuard upgrade (saves ~10–30s under DPI).</summary>
@@ -500,14 +500,15 @@ public static class WarpCli
             return (false, "WARP registration failed. Open the official WARP app once (or enable DPI assist), accept the ToS, then retry.", null, preferredProtocol);
         }
 
-        // Gaming / low-latency: set tunnel_only ONCE before connect. Re-applying after connect
-        // restarts the tunnel and often drops a working MASQUE session.
+        // Low-latency / gaming: prefer mode warp (WARP DNS) so sites like YouTube/X resolve
+        // correctly through the tunnel. tunnel_only + local DNS often breaks censored sites.
+        // IR excludes still keep domestic traffic off the tunnel.
         if (censorship.LowLatency)
         {
-            progress?.Report("Mode: tunnel_only (DNS stays with DNSveil — lower gaming latency)…");
-            Result mode = SetModeTunnelOnly();
+            progress?.Report("Mode: warp (stable DNS for sites) + Iran excludes after connect…");
+            Result mode = SetModeWarp();
             Result hi = Run("debug", "high-timeouts", "disable");
-            WarpSessionLog.Step("mode", "tunnel_only before connect",
+            WarpSessionLog.Step("mode", "warp before connect (gaming-friendly)",
                 new Dictionary<string, object?>
                 {
                     ["modeOk"] = mode.Ok,
@@ -525,10 +526,69 @@ public static class WarpCli
         List<string> list = endpoints?.Where(e => !string.IsNullOrWhiteSpace(e)).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
                             ?? new List<string>();
 
+        // Smart reconnect: last 24h successes — try immediately before any IRCF/CIDR scan.
+        List<string> remembered = WarpSuccessCache.GetRecentEndpoints();
+        if (remembered.Count > 0 && (censorship.Enabled || list.Count == 0))
+        {
+            progress?.Report($"Fast path: {remembered.Count} remembered endpoint(s) from last 24h…");
+            WarpSessionLog.Step("cache", $"fast-path {remembered.Count}",
+                new Dictionary<string, object?> { ["endpoints"] = string.Join(", ", remembered) });
+
+            string fastProto = censorship.Enabled ? "MASQUE" : preferredProtocol;
+            SetProtocol(fastProto);
+            if (fastProto.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
+                SetMasqueOptions("h3-with-h2-fallback");
+
+            int fi = 0;
+            foreach (string endpoint in remembered)
+            {
+                ct.ThrowIfCancellationRequested();
+                fi++;
+                progress?.Report($"[cache {fi}/{remembered.Count}] {endpoint}…");
+                WarpSessionLog.BeginAttempt(endpoint, fastProto, fi, remembered.Count);
+                long t0 = WarpSessionLog.ElapsedMs;
+                Disconnect();
+                Result setEp = SetEndpoint(endpoint);
+                if (!setEp.Ok)
+                {
+                    WarpSessionLog.AttemptResult(endpoint, fastProto, "cache-set-endpoint-failed",
+                        WarpSessionLog.ElapsedMs - t0, new Dictionary<string, object?> { ["err"] = setEp.ErrorLine });
+                    continue;
+                }
+                if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: false).ConfigureAwait(false))
+                {
+                    PublicIpInfo info = await FetchPublicIpInfoAsync(8000).ConfigureAwait(false);
+                    WarpSessionLog.Egress(info.Source ?? "trace", info,
+                        new Dictionary<string, object?> { ["endpoint"] = endpoint, ["fromCache"] = true });
+                    if (info.WarpOn == true)
+                    {
+                        WarpSessionLog.Decision("accept", "remembered endpoint worked",
+                            new Dictionary<string, object?> { ["endpoint"] = endpoint, ["ip"] = info.Ip, ["loc"] = info.Loc });
+                        WarpSessionLog.AttemptResult(endpoint, fastProto, "accept-cache-hit",
+                            WarpSessionLog.ElapsedMs - t0,
+                            new Dictionary<string, object?> { ["ip"] = info.Ip, ["loc"] = info.Loc });
+                        return await FinishConnectedAsync(
+                            $"Connected via remembered {endpoint} ({fastProto}).", endpoint, fastProto, censorship, progress, ct).ConfigureAwait(false);
+                    }
+                }
+                WarpSessionLog.AttemptResult(endpoint, fastProto, "cache-miss",
+                    WarpSessionLog.ElapsedMs - t0, new Dictionary<string, object?> { ["status"] = ParseStatus(Status()) });
+            }
+            progress?.Report("Remembered endpoints failed — falling back to full scan…");
+            WarpSessionLog.Decision("reject", "all remembered endpoints failed; full scan");
+        }
+
         if (censorship.Enabled && list.Count == 0)
         {
             list = await BuildCensorshipCandidatesAsync(preferredProtocol, censorship, progress, ct).ConfigureAwait(false);
+            // Still put remembered at front of the larger list for the scan loop.
+            if (remembered.Count > 0)
+                list = remembered.Concat(list).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             WarpSessionLog.Step("scan", $"candidates built: {list.Count}");
+        }
+        else if (remembered.Count > 0)
+        {
+            list = remembered.Concat(list).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         }
 
         // Under censorship: MASQUE only in the main loop (fast). Optional WG upgrade happens after connect.
@@ -555,6 +615,13 @@ public static class WarpCli
                 tryList = masquePorts.Count > 0
                     ? masquePorts.Concat(list.Except(masquePorts, StringComparer.OrdinalIgnoreCase)).ToList()
                     : list;
+            }
+            if (remembered.Count > 0)
+            {
+                tryList = remembered
+                    .Concat(tryList)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
             }
 
             if (tryList.Count == 0)
@@ -589,11 +656,35 @@ public static class WarpCli
                 progress?.Report($"{reachable.Count} endpoints look reachable (fastest first) — connecting…");
             }
 
+        // When we have remembered endpoints, try them first without waiting for the full probe sort
+        // to bury them — FilterReachableEndpointsAsync still ranks by RTT, so inject remembered
+        // at the front of the connect queue after probing.
+        if (remembered.Count > 0)
+        {
+            reachable = remembered
+                .Where(e => reachable.Contains(e, StringComparer.OrdinalIgnoreCase) || tryList.Contains(e, StringComparer.OrdinalIgnoreCase))
+                .Concat(reachable)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(censorship.Enabled ? censorship.MaxConnectAttempts : 12)
+                .ToList();
+            // Also try remembered even if TCP probe missed (WARP may still connect).
+            foreach (string rem in remembered)
+            {
+                if (!reachable.Contains(rem, StringComparer.OrdinalIgnoreCase))
+                    reachable.Insert(0, rem);
+            }
+            reachable = reachable.Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(censorship.Enabled ? Math.Max(censorship.MaxConnectAttempts, remembered.Count + 4) : 12)
+                .ToList();
+            progress?.Report($"Connect order: remembered first ({string.Join(", ", remembered.Take(3))}{(remembered.Count > 3 ? "…" : "")}).");
+        }
+
             WarpSessionLog.Step("probe", $"reachable={reachable.Count}",
                 new Dictionary<string, object?>
                 {
                     ["protocol"] = protocol,
                     ["endpoints"] = string.Join(", ", reachable.Take(12)),
+                    ["remembered"] = string.Join(", ", remembered.Take(8)),
                 });
 
             int n = 0;
@@ -757,8 +848,8 @@ public static class WarpCli
         {
             // Do NOT call SetModeTunnelOnly() again — already applied before connect.
             // Mode changes after Connected restart the tunnel and often fail under DPI.
-            progress?.Report("Gaming profile: keeping proven tunnel (no mode re-apply)…");
-            WarpSessionLog.Step("gaming", "skip post-connect mode change (preserves tunnel)");
+            progress?.Report("Gaming profile: WARP DNS kept (sites) + Iran excludes…");
+            WarpSessionLog.Step("gaming", "warp DNS + Iran excludes (no tunnel_only)");
 
             // WG upgrade is optional — under Iranian DPI it often fails and wastes 15–40s.
             if (opt.TryWireGuardUpgrade &&
@@ -853,6 +944,8 @@ public static class WarpCli
                 ["ip"] = finalInfo.Ip,
                 ["loc"] = finalInfo.Loc,
             });
+
+        WarpSuccessCache.Record(usedEndpoint, usedProtocol, finalInfo);
 
         return (true, message, usedEndpoint, usedProtocol);
     }

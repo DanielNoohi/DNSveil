@@ -49,9 +49,15 @@ public partial class FormMain : Form
             {
                 if (IsExiting) return;
                 Form? open = Application.OpenForms[nameof(FormGeoHideWarp)];
-                if (open != null) { open.BringToFront(); return; }
-                using FormGeoHideWarp f = new() { StartPosition = FormStartPosition.CenterParent };
-                f.ShowDialog(this);
+                if (open != null) { open.BringToFront(); open.WindowState = FormWindowState.Normal; return; }
+                // Modeless — ShowDialog blocks minimizing the main window while GeoHide is open.
+                FormGeoHideWarp f = new()
+                {
+                    StartPosition = FormStartPosition.CenterParent,
+                    Owner = this,
+                    ShowInTaskbar = true,
+                };
+                f.Show(this);
             };
             TabPageTools.Controls.Add(btnGeoHide);
         }

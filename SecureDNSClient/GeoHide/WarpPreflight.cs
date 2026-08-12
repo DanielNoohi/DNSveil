@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Http;
 using System.Net.NetworkInformation;
 using System.ServiceProcess;
 
@@ -53,8 +54,11 @@ public static class WarpPreflight
         report.PublicIp = info.Ip;
         report.Loc = info.Loc;
         report.WarpOn = info.WarpOn;
-        report.LikelyIran = string.Equals(info.Loc, "IR", StringComparison.OrdinalIgnoreCase);
         report.AlreadyOnWarp = info.WarpOn == true;
+
+        report.LikelyIran = string.Equals(info.Loc, "IR", StringComparison.OrdinalIgnoreCase);
+        if (!report.LikelyIran)
+            report.LikelyIran = await DetectIranFallbackAsync(info, report).ConfigureAwait(false);
 
         if (!string.IsNullOrEmpty(info.Ip))
             report.Notes.Add($"Public IP: {info.Ip}" + (string.IsNullOrEmpty(info.Loc) ? "" : $" [{info.Loc}]"));
@@ -65,6 +69,8 @@ public static class WarpPreflight
             report.Notes.Add($"Location is {info.Loc} (not IR). Censorship scan can stay off for a faster connect.");
         else if (!string.IsNullOrEmpty(info.Loc) && info.WarpOn == true)
             report.Notes.Add($"Already exiting via WARP in {info.Loc}.");
+        else if (string.IsNullOrEmpty(info.Loc))
+            report.Notes.Add("Could not read country from Cloudflare trace — using timezone/fallback heuristics.");
 
         if (report.AlreadyOnWarp)
             report.Warnings.Add("WARP already connected (warp=on). GeoHide will disconnect/reconnect — avoid stacking another VPN.");
@@ -143,6 +149,61 @@ public static class WarpPreflight
                 "Cannot start CloudflareWARP service (need Admin?): " + ex.Message,
                 false);
         }
+    }
+
+    /// <summary>
+    /// When CF loc is missing/wrong (common under DPI), use Windows timezone + a second geo API.
+    /// </summary>
+    private static async Task<bool> DetectIranFallbackAsync(WarpCli.PublicIpInfo primary, Report report)
+    {
+        try
+        {
+            TimeZoneInfo? tz = TimeZoneInfo.Local;
+            string tzId = tz.Id;
+            string tzName = tz.DisplayName;
+            bool tzIran =
+                tzId.Contains("Iran", StringComparison.OrdinalIgnoreCase) ||
+                tzId.Contains("Tehran", StringComparison.OrdinalIgnoreCase) ||
+                tzName.Contains("Iran", StringComparison.OrdinalIgnoreCase) ||
+                tzName.Contains("Tehran", StringComparison.OrdinalIgnoreCase) ||
+                Math.Abs(tz.BaseUtcOffset.TotalHours - 3.5) < 0.01; // IRST
+
+            if (tzIran)
+            {
+                report.Notes.Add($"Iran heuristic: Windows timezone looks Iranian ({tzId}).");
+                WarpSessionLog.Step("preflight", "iran via timezone",
+                    new Dictionary<string, object?> { ["tz"] = tzId });
+                return true;
+            }
+        }
+        catch { /* ignore */ }
+
+        // If Cloudflare loc failed, try ipapi.co / ipinfo (best-effort, short timeout).
+        if (string.IsNullOrEmpty(primary.Loc) || primary.Error != null)
+        {
+            try
+            {
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(4) };
+                http.DefaultRequestHeaders.UserAgent.ParseAdd("DNSveil-GeoHide/3.5");
+                string body = await http.GetStringAsync("https://ipapi.co/country/").ConfigureAwait(false);
+                string cc = (body ?? "").Trim().Trim('"');
+                if (cc.Equals("IR", StringComparison.OrdinalIgnoreCase))
+                {
+                    report.Loc ??= "IR";
+                    report.Notes.Add("Iran heuristic: ipapi.co country=IR.");
+                    WarpSessionLog.Step("preflight", "iran via ipapi.co");
+                    return true;
+                }
+                if (cc.Length == 2)
+                    report.Notes.Add($"Fallback geo country={cc} (ipapi.co).");
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("DetectIranFallbackAsync: " + ex.Message);
+            }
+        }
+
+        return false;
     }
 
     private static (bool Found, string? Hint) DetectOtherVpnAdapters()

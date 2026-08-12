@@ -45,11 +45,12 @@ public class FormGeoHideWarp : Form
         Text = "GeoHide — Cloudflare WARP";
         ClientSize = new Size(640, 590);
         StartPosition = FormStartPosition.CenterParent;
-        FormBorderStyle = FormBorderStyle.FixedSingle;
+        FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = false;
         MinimizeBox = true;
         ShowInTaskbar = true;
         ShowIcon = true;
+        MinimumSize = new Size(640, 520);
         BackColor = Color.FromArgb(32, 32, 32);
         ForeColor = Color.WhiteSmoke;
         Font = new Font("Segoe UI", 9F);
@@ -136,7 +137,7 @@ public class FormGeoHideWarp : Form
 
         _chkLowLatency.AutoSize = true;
         _chkLowLatency.Location = new Point(12, 224);
-        _chkLowLatency.Text = "Low latency (gaming) — tunnel_only before connect + Iran excludes (keeps proven tunnel)";
+        _chkLowLatency.Text = "Low latency (gaming) — Iran excludes + stop DPI (keeps WARP DNS so sites work)";
         _chkLowLatency.ForeColor = Color.WhiteSmoke;
         _chkLowLatency.BackColor = Color.Transparent;
         _chkLowLatency.Checked = true;
