@@ -25,9 +25,10 @@ internal static class ReliabilityChecks
         {
             string pidFile = Path.Combine(Path.GetTempPath(), "dnsveil-test-" + Guid.NewGuid().ToString("N"));
             using var cts = new CancellationTokenSource();
+            Task<WarpCli.Result>? command = null;
             try
             {
-                var command = WarpCommandRunner.RunAsync(executable, Fixture("wait", pidFile),
+                command = WarpCommandRunner.RunAsync(executable, Fixture("wait", pidFile),
                     TimeSpan.FromSeconds(cancel ? 30 : 2), cts.Token);
                 var start = Stopwatch.StartNew();
                 while (!File.Exists(pidFile) && start.Elapsed < TimeSpan.FromSeconds(5) && !command.IsCompleted)
@@ -45,7 +46,16 @@ internal static class ReliabilityChecks
                 check(!running && (cancel ? cancelled : result?.Combined.Contains("timed out") == true),
                     cancel ? "Cancellation stops the running child process" : "Timeout stops the running child process");
             }
-            finally { File.Delete(pidFile); }
+            finally
+            {
+                cts.Cancel();
+                if (command != null)
+                {
+                    try { await command; } catch (OperationCanceledException) { }
+                }
+                File.Delete(pidFile);
+                File.Delete(pidFile + ".writing");
+            }
         }
 
         using (var cts = new CancellationTokenSource())

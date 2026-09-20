@@ -16,7 +16,8 @@ if (args.Length > 0 && args[0] == "--fixture")
         Console.Error.Write(new string('y', 100_000));
         return 0;
     }
-    File.WriteAllText(args[2], Environment.ProcessId.ToString());
+    File.WriteAllText(args[2] + ".writing", Environment.ProcessId.ToString());
+    File.Move(args[2] + ".writing", args[2]);
     await Task.Delay(TimeSpan.FromMinutes(1));
     return 0;
 }
