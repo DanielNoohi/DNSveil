@@ -20,9 +20,9 @@ try {
     dotnet run --project Tests/RegressionTests/RegressionTests.csproj --configuration Release
     if ($LASTEXITCODE -ne 0) { throw 'Regression checks failed.' }
     $portableRoot = Join-Path $releaseRoot 'SecureDNSClientPortable'
-    dotnet publish SecureDNSClient/SecureDNSClient.csproj -p:PublishProfile=X64 "-p:PublishDir=$portableRoot/SecureDNSClient/"
+    dotnet publish SecureDNSClient/SecureDNSClient.csproj --configuration Release -p:PublishProfile=X64 "-p:PublishDir=$portableRoot/SecureDNSClient/"
     if ($LASTEXITCODE -ne 0) { throw 'Application publish failed.' }
-    dotnet publish SecureDNSClientPortable/SecureDNSClientPortable.csproj -p:PublishProfile=X64 "-p:PublishDir=$portableRoot/"
+    dotnet publish SecureDNSClientPortable/SecureDNSClientPortable.csproj --configuration Release -p:PublishProfile=X64 "-p:PublishDir=$portableRoot/"
     if ($LASTEXITCODE -ne 0) { throw 'Launcher publish failed.' }
     foreach ($binary in @('SecureDNSClient/SecureDNSClient.dll', 'SecureDNSClientPortable.exe')) {
         $actual = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $portableRoot $binary)).ProductVersion
