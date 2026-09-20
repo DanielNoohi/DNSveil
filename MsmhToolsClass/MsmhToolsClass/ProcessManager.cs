@@ -238,10 +238,20 @@ public static class ProcessManager
         {
             Debug.WriteLine("ProcessManager ExecuteAsync 2: " + ex.Message);
             output = ex.Message;
+            // Timeout: kill abandoned process (do not leave orphans)
+            try
+            {
+                if (process0 != null && !process0.HasExited)
+                    process0.Kill(entireProcessTree: true);
+            }
+            catch (Exception killEx)
+            {
+                Debug.WriteLine("ProcessManager ExecuteAsync kill: " + killEx.Message);
+            }
         }
         finally
         {
-            process0?.Dispose();
+            try { process0?.Dispose(); } catch { /* ignore */ }
         }
 
         return (isSuccess, output);

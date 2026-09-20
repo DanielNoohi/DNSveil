@@ -22,7 +22,7 @@ public static class WarpLinkQuality
         {
             Timeout = Timeout.InfiniteTimeSpan,
         };
-        h.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "DNSveil-GeoHide/1.0");
+        h.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "DNSveil-GeoHide/3.6");
         return h;
     }
 

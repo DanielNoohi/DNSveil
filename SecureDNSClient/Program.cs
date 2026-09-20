@@ -99,32 +99,59 @@ internal static partial class Program
         ApplicationConfiguration.Initialize();
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
 
-        // Prevent multiple instances
-        string productName = Info.GetAppInfo(Assembly.GetExecutingAssembly()).ProductName ?? "SDC - Secure DNS Client";
-        Mutex mutex = new(false, productName);
-        if (!mutex.WaitOne(0, true))
+        // Prevent multiple instances (mutex only — process-name check false-triggers with portable launcher)
+        string productName = Info.GetAppInfo(Assembly.GetExecutingAssembly()).ProductName ?? "DNSveil";
+        using Mutex mutex = new(false, "Global\\DNSveil-SecureDNSClient-SingleInstance");
+        bool ownsMutex;
+        try
+        {
+            ownsMutex = mutex.WaitOne(0, true);
+        }
+        catch (AbandonedMutexException)
+        {
+            // The previous process crashed; WaitOne still grants us ownership.
+            ownsMutex = true;
+        }
+        if (!ownsMutex)
         {
             MessageBox.Show($"{productName} is already running.");
             Environment.Exit(0);
             Application.Exit();
             return;
         }
-        GC.KeepAlive(mutex);
-
-        bool isAlreadyRunning = Process.GetProcessesByName(Process.GetCurrentProcess().ProcessName).Length > 1;
-        if (isAlreadyRunning)
+        try
         {
-            MessageBox.Show($"{productName} is already running.");
-            Environment.Exit(0);
-            Application.Exit();
-            return;
+            TaskScheduler.UnobservedTaskException += TaskScheduler_UnobservedTaskException;
+            Application.ThreadException += Application_ThreadException;
+            AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
+
+            Application.Run(new FormMain());
         }
+        finally
+        {
+            mutex.ReleaseMutex();
+        }
+    }
 
-        TaskScheduler.UnobservedTaskException += TaskScheduler_UnobservedTaskException;
-        Application.ThreadException += Application_ThreadException;
-        AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
-
-        Application.Run(new FormMain());
+    /// <summary>
+    /// Best-effort recovery so a crash mid–Set DNS / proxy / DPI does not leave the machine broken.
+    /// </summary>
+    private static void TryEmergencyNetworkCleanup(string reason)
+    {
+        try
+        {
+            Debug.WriteLine("Emergency network cleanup: " + reason);
+            try { NetworkTool.UnsetProxy(false, true); } catch { /* ignore */ }
+            try
+            {
+                // Fire-and-forget unset of NIC DNS pointing at loopback
+                _ = NetworkTool.UnsetDnsAutoAsync();
+            }
+            catch { /* ignore */ }
+            try { _ = ProcessManager.KillProcessByNameAsync("goodbyedpi"); } catch { /* ignore */ }
+            try { _ = ProcessManager.KillProcessByNameAsync("WinDivert"); } catch { /* ignore */ }
+        }
+        catch { /* ignore */ }
     }
 
     private static async void TaskScheduler_UnobservedTaskException(object? sender, UnobservedTaskExceptionEventArgs e)
@@ -133,6 +160,7 @@ internal static partial class Program
         {
             string err = e.Exception.GetInnerExceptions() + Environment.NewLine;
             Debug.WriteLine("-=-=-=-=-=-=-=-=-=-=-=-= UnobservedTaskException:" + Environment.NewLine + err);
+            TryEmergencyNetworkCleanup("UnobservedTaskException");
 
             try
             {
@@ -154,6 +182,7 @@ internal static partial class Program
         {
             string err = e.Exception.GetInnerExceptions() + Environment.NewLine;
             Debug.WriteLine("-=-=-=-=-=-=-=-=-=-=-=-= ThreadException:" + Environment.NewLine + err);
+            TryEmergencyNetworkCleanup("ThreadException");
 
             try
             {
@@ -176,6 +205,7 @@ internal static partial class Program
             string? err = e.ExceptionObject.ToString() + Environment.NewLine;
             if (string.IsNullOrEmpty(err)) return;
             Debug.WriteLine("-=-=-=-=-=-=-=-=-=-=-=-= UnhandledException:" + Environment.NewLine + err);
+            TryEmergencyNetworkCleanup("UnhandledException");
 
             try
             {

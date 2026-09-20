@@ -520,9 +520,35 @@ public partial class FormMain
             catch (Exception) { }
 
             //// Tools
-            spaceV = 30;
+            spaceV = 22;
+            // Hero: GeoHide across the top
+            Control[] geoHideBtns = TabPageTools.Controls.Find("CustomButtonToolsGeoHideWarp", false);
+            int toolsLeft = 50;
+            int toolsTop = 28;
+            if (geoHideBtns.Length > 0)
+            {
+                Control g = geoHideBtns[0];
+                g.Left = toolsLeft;
+                g.Top = toolsTop;
+                g.Width = 420;
+                g.Height = 52;
+                g.Visible = true;
+                g.BringToFront();
+                Control[] subs = TabPageTools.Controls.Find("LabelToolsGeoHideSub", false);
+                if (subs.Length > 0)
+                {
+                    Control s = subs[0];
+                    s.Left = g.Left + 2;
+                    s.Top = g.Bottom + 6;
+                    s.Visible = true;
+                    s.BringToFront();
+                    toolsTop = s.Bottom + 22;
+                }
+                else toolsTop = g.Bottom + 22;
+            }
+
             // ---------- Col 1
-            CustomButtonToolsDnsScanner.Location = new Point(50, 50);
+            CustomButtonToolsDnsScanner.Location = new Point(toolsLeft, toolsTop);
 
             CustomButtonToolsDnsLookup.Left = CustomButtonToolsDnsScanner.Left;
             CustomButtonToolsDnsLookup.Top = CustomButtonToolsDnsScanner.Bottom + spaceV;
@@ -543,14 +569,14 @@ public partial class FormMain
             CustomButtonBenchmark.Left = CustomButtonToolsFlushDns.Left;
             CustomButtonBenchmark.Top = CustomButtonToolsFlushDns.Bottom + spaceV;
 
-            Control[] geoHideBtns = TabPageTools.Controls.Find("CustomButtonToolsGeoHideWarp", false);
-            if (geoHideBtns.Length > 0)
+            foreach (CustomButton tb in new[]
             {
-                Control g = geoHideBtns[0];
-                g.Left = CustomButtonBenchmark.Left;
-                g.Top = CustomButtonBenchmark.Bottom + spaceV;
-                g.Visible = true;
-                g.BringToFront();
+                CustomButtonToolsDnsScanner, CustomButtonToolsDnsLookup, CustomButtonToolsStampReader,
+                CustomButtonToolsStampGenerator, CustomButtonToolsIpScanner, CustomButtonToolsFlushDns,
+                CustomButtonBenchmark
+            })
+            {
+                tb.RoundedCorners = 8;
             }
 
             //// Settings

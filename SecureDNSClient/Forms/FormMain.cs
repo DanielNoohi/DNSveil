@@ -36,21 +36,32 @@ public partial class FormMain : Form
             {
                 Name = "CustomButtonToolsGeoHideWarp",
                 Text = "GeoHide WARP",
-                BorderColor = Color.Blue,
+                BorderColor = Color.FromArgb(56, 139, 253),
                 FlatStyle = FlatStyle.Flat,
-                RoundedCorners = 5,
-                SelectionColor = Color.LightBlue,
-                Size = new Size(115, 27),
-                Location = new Point(200, 150),
+                RoundedCorners = 10,
+                SelectionColor = Color.FromArgb(88, 166, 255),
+                Size = new Size(420, 52),
+                Location = new Point(50, 28),
                 Visible = false,
+                Font = new Font("Segoe UI Semibold", 11F, FontStyle.Bold),
                 UseVisualStyleBackColor = true
+            };
+            var tipGeo = new ToolTip();
+            tipGeo.SetToolTip(btnGeoHide, "Official warp-cli · remotes see Cloudflare IPs · best for gaming under DPI");
+            var lblGeoSub = new Label
+            {
+                Name = "LabelToolsGeoHideSub",
+                Text = "Cloudflare exit IP for games and remotes  ·  official warp-cli",
+                AutoSize = true,
+                ForeColor = Color.FromArgb(139, 148, 158),
+                BackColor = Color.Transparent,
+                Visible = false,
             };
             btnGeoHide.Click += (_, _) =>
             {
                 if (IsExiting) return;
                 Form? open = Application.OpenForms[nameof(FormGeoHideWarp)];
                 if (open != null) { open.BringToFront(); open.WindowState = FormWindowState.Normal; return; }
-                // Modeless — ShowDialog blocks minimizing the main window while GeoHide is open.
                 FormGeoHideWarp f = new()
                 {
                     StartPosition = FormStartPosition.CenterParent,
@@ -60,6 +71,7 @@ public partial class FormMain : Form
                 f.Show(this);
             };
             TabPageTools.Controls.Add(btnGeoHide);
+            TabPageTools.Controls.Add(lblGeoSub);
         }
         catch (Exception ex)
         {
@@ -111,10 +123,11 @@ public partial class FormMain : Form
 
         // Label Main
         Controls.Add(LabelMain);
-        LabelMain.Text = "Getting Ready...";
+        LabelMain.Text = "DNSveil";
         LabelMain.Dock = DockStyle.Fill;
         LabelMain.TextAlign = ContentAlignment.MiddleCenter;
-        LabelMain.Font = new Font(Font.FontFamily, Font.Size * 1.5f);
+        LabelMain.Font = new Font("Segoe UI Semibold", Font.Size * 2.6f, FontStyle.Bold);
+        LabelMain.ForeColor = Color.FromArgb(88, 166, 255);
         SplitContainerMain.Visible = false;
         LabelMain.Visible = true;
         LabelMain.BringToFront();
@@ -130,7 +143,7 @@ public partial class FormMain : Form
         await FillComboBoxesAsync();
 
         // App Startup Defaults
-        string productName = Info.GetAppInfo(Assembly.GetExecutingAssembly()).ProductName ?? "SDC - Secure DNS Client";
+        string productName = Info.GetAppInfo(Assembly.GetExecutingAssembly()).ProductName ?? "DNSveil";
         string productVersion = Info.GetAppInfo(Assembly.GetExecutingAssembly()).ProductVersion ?? "0.0.0";
         string archText = getArchText(ArchOs, ArchProcess);
 
@@ -145,15 +158,21 @@ public partial class FormMain : Form
                 return $"{archProcessStr} on {archOsStr} OS (Experimental)";
         }
 
-        Text = $"{productName} {archText} v{productVersion}";
+        // Prefer DNSveil branding in the window title even if assembly Product is legacy.
+        string brand = string.IsNullOrWhiteSpace(productName) || productName.Contains("Secure DNS", StringComparison.OrdinalIgnoreCase)
+            ? "DNSveil"
+            : productName;
+        Text = $"{brand} {archText} v{productVersion}";
         if (Program.IsPortable) Text += " Portable";
         if (isBeta) Text += " Beta";
         CustomButtonSetDNS.Enabled = false;
         CustomButtonSetProxy.Enabled = false;
         CustomTabControlSettings.HideTabHeader = true;
 
-        // Set NotifyIcon Text
-        NotifyIconMain.Text = Text;
+        // Set NotifyIcon Text (tray tip limited ~63 chars on Windows)
+        string tray = $"{brand} v{productVersion}";
+        if (Program.IsPortable) tray += " Portable";
+        NotifyIconMain.Text = tray.Length <= 63 ? tray : tray[..63];
 
         // Create UserData & Assets Dir If Not Exist
         FileDirectory.CreateEmptyDirectory(SecureDNS.UserDataDirPath);
@@ -176,7 +195,7 @@ public partial class FormMain : Form
 
         // Logics After Load Settings
         ProxyPort = GetProxyPortSetting(); // Load Proxy Port
-        SplitContainerMain.BackColor = Color.IndianRed; // Drag Bar Color
+        SplitContainerMain.BackColor = Color.FromArgb(56, 139, 253); // Brand accent drag bar
         CustomTextBoxHTTPProxy.Enabled = true; // Connect -> Method 4
         CustomCheckBoxSettingQcSetProxy.Enabled = CustomCheckBoxSettingQcStartProxyServer.Checked; // Setting -> Qc -> Set Proxy
 
@@ -691,9 +710,11 @@ public partial class FormMain : Form
 
             if (!File.Exists(SecureDNS.FirstRun))
             {
-                NotifyIconMain.BalloonTipText = "Minimized to tray.";
+                NotifyIconMain.BalloonTipTitle = "DNSveil";
+                NotifyIconMain.BalloonTipText =
+                    "Minimized to tray. DNS / DPI may stay active — use tray → Exit to fully quit.";
                 NotifyIconMain.BalloonTipIcon = ToolTipIcon.Info;
-                NotifyIconMain.ShowBalloonTip(100);
+                NotifyIconMain.ShowBalloonTip(4000);
             }
         }
         else

@@ -5583,7 +5583,7 @@
             // 
             // CustomLabelAboutThis2
             // 
-            CustomLabelAboutThis2.AutoSize = true;
+            CustomLabelAboutThis2.AutoSize = false;
             CustomLabelAboutThis2.BackColor = Color.Transparent;
             CustomLabelAboutThis2.Border = false;
             CustomLabelAboutThis2.BorderColor = Color.Blue;
@@ -5592,9 +5592,9 @@
             CustomLabelAboutThis2.Location = new Point(235, 75);
             CustomLabelAboutThis2.Name = "CustomLabelAboutThis2";
             CustomLabelAboutThis2.RoundedCorners = 0;
-            CustomLabelAboutThis2.Size = new Size(460, 15);
+            CustomLabelAboutThis2.Size = new Size(480, 48);
             CustomLabelAboutThis2.TabIndex = 2;
-            CustomLabelAboutThis2.Text = "A DNS Client, Supporting Anonymized DNSCrypt, DNSCrypt, DoH, DoT, UDP and TCP.";
+            CustomLabelAboutThis2.Text = "Secure DNS · DPI bypass · GeoHide (Cloudflare exit for games).\r\nFork of Secure DNS Client — github.com/DanielNoohi/DNSveil";
             // 
             // CustomLabelAboutThis
             // 
@@ -5609,9 +5609,9 @@
             CustomLabelAboutThis.Location = new Point(235, 33);
             CustomLabelAboutThis.Name = "CustomLabelAboutThis";
             CustomLabelAboutThis.RoundedCorners = 0;
-            CustomLabelAboutThis.Size = new Size(367, 32);
+            CustomLabelAboutThis.Size = new Size(140, 32);
             CustomLabelAboutThis.TabIndex = 1;
-            CustomLabelAboutThis.Text = "SDC - Secure DNS Client";
+            CustomLabelAboutThis.Text = "DNSveil";
             CustomLabelAboutThis.Click += CustomLabelAboutThis_Click;
             // 
             // PictureBoxAbout

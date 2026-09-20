@@ -1,4 +1,4 @@
-﻿# DNSveil
+# DNSveil
 
 **Secure DNS. DPI bypass. Optional Cloudflare exit — without renting a VPS.**
 
@@ -7,9 +7,9 @@
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D4?style=flat-square)](#requirements)
 [![.NET](https://img.shields.io/badge/.NET-6-512BD4?style=flat-square)](#requirements)
 
-A hardened fork of [msasanmh/DNSveil](https://github.com/msasanmh/DNSveil) (Secure DNS Client) with **GeoHide WARP**, Iran-aware connect paths, Smart DNS presets, and production-minded reliability work.
+A hardened fork of [msasanmh/DNSveil](https://github.com/msasanmh/DNSveil) (Secure DNS Client) with **GeoHide WARP**, Iran-aware connect paths, and production-minded reliability work.
 
-**Latest:** [v3.5.11](https://github.com/DanielNoohi/DNSveil/releases/latest) · [Download portable x64](https://github.com/DanielNoohi/DNSveil/releases/latest)
+**Latest:** [v3.6.9](https://github.com/DanielNoohi/DNSveil/releases/latest) · [Download portable x64](https://github.com/DanielNoohi/DNSveil/releases/latest)
 
 ---
 
@@ -130,15 +130,7 @@ CIDR|Rules;
 
 Useful rules: Fake DNS, custom DNS, DNS via upstream proxy, `dnsdomain:`, `proxy:`, `sni:`, Direct (`--;`), Block (`-;`).
 
-Presets under `Assets/Presets/`:
-
-- Shecan-style anti-sanction Smart DNS  
-- Gaming Smart DNS template  
-- Via upstream proxy template  
-
-Import from GeoHide or Settings → Edit Rules. After import, rules re-apply to a running DNS / Share proxy.
-
-Full syntax examples remain in the upstream docs and the rules editor.
+GeoHide does **not** ship Shecan / gaming Smart DNS / upstream-proxy presets anymore — use **Tools → GeoHide WARP** so remotes see a Cloudflare exit IP. Full Rules syntax remains in Settings → Edit Rules.
 
 ---
 
@@ -152,12 +144,34 @@ Full syntax examples remain in the upstream docs and the rules editor.
 
 ---
 
+## Latest fixes — v3.6.9
+
+- WARP reachability scanning now retains port 8443 when the port 443 probe fails and the fallback succeeds.
+- Candidate generation and reachability scanning honor requested result limits, including zero.
+- The single-instance lock stays alive until shutdown and recovers ownership after an abandoned lock.
+- Added six local regression checks. See [test instructions](Tests/RegressionTests/README.md).
+
+The application builds and all six regression checks pass. Live WARP connectivity has not been verified for this release. Existing .NET 6 / dependency compatibility warnings remain.
+
 ## Changelog (this fork)
 
 Recent work focuses on GeoHide reliability under censorship:
 
 | Version | Focus |
 |---------|--------|
+| **3.6.9** | Correct WARP fallback port and scanner limits; retain single-instance lock; add regression checks |
+| **3.6.8** | IPv4-only handshake (stop [::]:0 happy-eyeballs); fake-packet DPI without splitting PQ ClientHello |
+| **3.6.7** | Stop endpoint-reset/:2408 first shot; honor pasted IP:443; MASQUE without FakeTTL first; wait for warp-cli daemon |
+| **3.6.6** | Restart warp-svc so MASQUE actually loads; pin TCP :443 if daemon still dials :2408 |
+| **3.6.5** | Force MASQUE to stick on warp-cli 2026 (was silently using WireGuard :2408); taller tabs, GeoHide hero on Tools |
+| **3.6.4** | MASQUE DPI ladder: fake-TTL / wrong-seq (survives TCP reassembly); honor Iran-mode checkbox |
+| **3.6.3** | Honor Iran-mode checkbox (no auto-recheck); skip forced-IP scan on warp-cli 2026 |
+| **3.6.2** | Default Cloudflare endpoint first; detached GoodbyeDPI; WireGuard fallback |
+| **3.6.1** | Connect: mid-scan DPI escalate (Light→Medium→Mode5) + warp+doh; whole-app slate theme |
+| **3.6.0** | Professional pass: GeoHide UI redesign + DNSveil shell branding; crash DNS/proxy cleanup; ProcessManager timeout kill; tray/exit clarity; Iran Light-DPI path kept |
+| **3.5.14** | Restore proven Light-DPI path (Extreme hammer broke MASQUE); longer connect polls; soft settle; quality gate off under IR |
+| **3.5.13** | Iran DPI hammer: escalate GoodbyeDPI profiles × MASQUE modes × more endpoints; faster stuck-Connecting rotate |
+| **3.5.12** | GeoHide WARP-only: remove Shecan / Smart DNS / upstream-proxy presets (remotes see Cloudflare IPs) |
 | **3.5.11** | Honor Protocol choice (WireGuard no longer forced to MASQUE); WG-only cache/scan when selected |
 | **3.5.10** | Robust link quality gate (RTT + download + soak); reject weak endpoints and try next; health watch auto-rotates on timeout |
 | **3.5.9** | Stability under DPI: MASQUE h2-only + high-timeouts; longer polls; settle checks; Iran excludes off by default (less jitter) |

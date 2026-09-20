@@ -12,10 +12,14 @@ Under Iranian filtering we combine that with techniques from:
 
 DNSveil’s **Tools → GeoHide WARP** window:
 
-1. Optional **DPI assist** starts GoodbyeDPI (fragment) before `warp-cli connect`
-2. Forces **MASQUE** with `h3-with-h2-fallback` (when QUIC/H3 is blocked, falls to HTTP/2 TCP — where fragment works)
-3. Fetches IRCF endpoints + samples Cloudflare WARP CIDRs (`162.159.192–199`, `188.114.96–99`)
-4. Parallel TCP probes, then connect attempts on the fastest hosts
+1. Optional **DPI assist** starts a MASQUE GoodbyeDPI **ladder** before `warp-cli connect`:
+   - **FakeTTL** — fake ClientHello with low TTL (DPI sees it, Cloudflare does not)
+   - **WrongSeq** — fake packets with past TCP SEQ (desyncs stateful DPI that reassembles fragments)
+   - **FakeSeqTTL** — both
+   - **LightFrag** — TLS ClientHello split (older DPI)
+   - **Mode9 / FakeSNI** — only if `goodbyedpi.exe` is new enough (`-q`, `--fake-with-sni`)
+2. Under Iran mode: **MASQUE** with **`h2-only`** + high-timeouts (HTTP/2 TCP — where GoodbyeDPI works). Forced engage IPs are skipped on warp-cli 2026 (they go Unable).
+3. If h2 fails: **h3-with-h2-fallback**, then **WireGuard** default.
 
 ## Why this changes what remotes see
 
@@ -26,10 +30,9 @@ Traffic leaves through Cloudflare’s network. Destinations see a **Cloudflare e
 1. Install [Cloudflare WARP](https://one.one.one.one/) (includes `warp-cli`). Open it once, accept ToS.
 2. Run DNSveil **as Administrator** (needed for GoodbyeDPI / WinDivert).
 3. **Tools → GeoHide WARP**
-4. Leave **Censorship mode** and **DPI assist** checked.
-5. Protocol = **MASQUE**. Click **Connect**.
-6. Confirm Public IP shows `warp=on` and a non-Iran location when possible.
-7. Optional: import Shecan anti-sanction rules for websites.
+4. Leave **Iran mode** and **DPI assist** checked.
+5. Protocol = **MASQUE** (or WireGuard if UDP works). Click **Connect**.
+6. Confirm Public IP shows `warp=on` — remotes (including game servers) see a **Cloudflare** exit IP.
 
 ## Hard limits of official `warp-cli`
 
@@ -39,8 +42,9 @@ Traffic leaves through Cloudflare’s network. Destinations see a **Cloudflare e
 
 ## Notes
 
-- Low-latency/gaming keeps **WARP DNS** (not `tunnel_only`) so sites like YouTube/X resolve through the tunnel; Iran excludes still apply.
+- Low-latency/gaming keeps **WARP DNS** (not `tunnel_only`) so sites resolve through the tunnel.
+- Iran split-tunnel excludes stay **off by default** (they often hurt stability under DPI).
 - Successful endpoints are remembered for **24 hours** (`UserData/GeoHideSuccessCache.json`) and tried before a full scan.
-- Success requires Cloudflare trace `warp=on` (status Connected alone is not enough).
-- Each Connect writes diagnostics under `UserData/GeoHideLogs/` (`session-*.log` + `session-*.jsonl`). High-signal phases: `env`, `decision`, `egress`, `attempt_result`, `cache`, `status_change`.
-- Core DNSveil features (DoH, Share Fragment) still do **not** replace a tunnel for IP hiding; WARP is the GeoHide companion.
+- Success requires Cloudflare trace `warp=on`; under Iran mode the accept quality gate stays soft/off and health watch rotates weak links.
+- Each Connect writes diagnostics under `UserData/GeoHideLogs/`.
+- **No Smart DNS / Shecan / upstream-proxy presets** — GeoHide is WARP-only so remotes see Cloudflare IPs.

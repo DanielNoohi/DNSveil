@@ -429,8 +429,8 @@ public partial class FormMain
                 // Help System To Connect
                 if (Program.IsStartup && NetState == NetworkTool.InternetState.Offline)
                 {
-                    await ProcessManager.ExecuteAsync("ipconfig", null, "/release", true, true);
-                    await ProcessManager.ExecuteAsync("ipconfig", null, "/renew", true, true);
+                    // Do NOT ipconfig /release+/renew — that drops connectivity during boot Quick Connect.
+                    Debug.WriteLine("UpdateStatusAuto: startup offline — skipping ipconfig release/renew.");
                 }
 
                 NetPreState = NetState;

@@ -1,41 +1,40 @@
 using CustomControls;
 using MsmhToolsClass;
+using MsmhToolsWinFormsClass.Themes;
 using SecureDNSClient.GeoHide;
 using System.Diagnostics;
 
 namespace SecureDNSClient;
 
 /// <summary>
-/// GeoHide via official Cloudflare WARP (warp-cli), patterned after pywarp:
-/// https://github.com/saeedmasoudie/pywarp
-/// Censorship mode: IRCF endpoints + CF CIDR scan + GoodbyeDPI TLS fragment
-/// (GFW-knocker / patterniha lessons for Iranian DPI).
+/// GeoHide via official Cloudflare WARP (warp-cli).
+/// Iran path: fake-TTL/wrong-seq GoodbyeDPI + MASQUE h2-only (Cloudflare default).
 /// </summary>
 public class FormGeoHideWarp : Form
 {
-    private readonly Label _lblHelp = new();
+    private readonly Panel _pnlHeader = new();
+    private readonly Label _lblBrand = new();
+    private readonly Label _lblTagline = new();
     private readonly Label _lblStatus = new();
     private readonly Label _lblIp = new();
+    private readonly Label _lblHealth = new();
     private readonly Label _lblEp = new();
     private readonly Label _lblProto = new();
-    private readonly Label _lblPreset = new();
-    private readonly Label _lblFoot = new();
     private readonly ComboBox _cmbEndpoint = new();
     private readonly ComboBox _cmbProtocol = new();
-    private readonly ComboBox _cmbPreset = new();
     private readonly CustomButton _btnRefresh = new();
     private readonly CustomButton _btnConnect = new();
     private readonly CustomButton _btnDisconnect = new();
     private readonly CustomButton _btnCancel = new();
     private readonly CustomButton _btnInstall = new();
-    private readonly CustomButton _btnImportPreset = new();
     private readonly CustomButton _btnHelp = new();
+    private readonly CustomButton _btnLogs = new();
+    private readonly CustomButton _btnMinimize = new();
     private readonly TextBox _log = new();
-    private readonly CheckBox _chkImportAfterConnect = new();
     private readonly CheckBox _chkCensorship = new();
     private readonly CheckBox _chkDpiAssist = new();
     private readonly CheckBox _chkLowLatency = new();
-    private readonly CustomButton _btnMinimize = new();
+    private readonly ToolTip _tips = new();
     private CancellationTokenSource? _cts;
     private CancellationTokenSource? _watchCts;
     private string? _activeEndpoint;
@@ -43,168 +42,25 @@ public class FormGeoHideWarp : Form
     private WarpCli.CensorshipOptions? _lastOpt;
     private bool _busy;
     private bool _reloadingEndpoints;
+    private string _lastHealthSummary = "Health: idle";
 
     public FormGeoHideWarp()
     {
-        Text = "GeoHide — Cloudflare WARP";
-        ClientSize = new Size(640, 590);
+        Text = "DNSveil GeoHide";
+        ClientSize = new Size(720, 560);
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.Sizable;
-        MaximizeBox = false;
+        MaximizeBox = true;
         MinimizeBox = true;
         ShowInTaskbar = true;
         ShowIcon = true;
-        MinimumSize = new Size(640, 520);
-        BackColor = Color.FromArgb(32, 32, 32);
-        ForeColor = Color.WhiteSmoke;
+        MinimumSize = new Size(680, 500);
         Font = new Font("Segoe UI", 9F);
 
-        SuspendLayout();
+        BuildLayout();
+        Theme.LoadTheme(this, Theme.Themes.Dark);
+        ApplyHeaderStyle();
 
-        _lblHelp.AutoSize = false;
-        _lblHelp.Location = new Point(12, 10);
-        _lblHelp.Size = new Size(616, 40);
-        _lblHelp.Text = "Uses official Cloudflare WARP (warp-cli). Under Iranian DPI: enable Censorship + DPI assist, then Connect (scans IRCF/CF and connects). Destinations see a Cloudflare exit IP — not your ISP.";
-
-        _lblStatus.AutoSize = false;
-        _lblStatus.Location = new Point(12, 54);
-        _lblStatus.Size = new Size(490, 22);
-        _lblStatus.Text = "Status: …";
-        _lblStatus.AutoEllipsis = true;
-
-        _lblIp.AutoSize = false;
-        _lblIp.Location = new Point(12, 76);
-        _lblIp.Size = new Size(600, 22);
-        _lblIp.Text = "Public IP: …";
-        _lblIp.AutoEllipsis = true;
-
-        StyleBtn(_btnRefresh, "Refresh", new Point(510, 50), 100);
-        _btnRefresh.Click += async (_, _) =>
-        {
-            try { await RefreshStatusAsync(fromUser: true).ConfigureAwait(true); }
-            catch (Exception ex) { Log("Refresh error: " + ex.Message); }
-        };
-        _btnRefresh.BringToFront();
-
-        _lblEp.AutoSize = true;
-        _lblEp.Location = new Point(12, 108);
-        _lblEp.Text = "Endpoint";
-        _cmbEndpoint.Location = new Point(80, 104);
-        _cmbEndpoint.Size = new Size(280, 28);
-        _cmbEndpoint.DropDownStyle = ComboBoxStyle.DropDown;
-        StyleCombo(_cmbEndpoint);
-
-        _lblProto.AutoSize = true;
-        _lblProto.Location = new Point(380, 108);
-        _lblProto.Text = "Protocol";
-        _cmbProtocol.Location = new Point(440, 104);
-        _cmbProtocol.Size = new Size(120, 28);
-        _cmbProtocol.DropDownStyle = ComboBoxStyle.DropDownList;
-        StyleCombo(_cmbProtocol);
-        _cmbProtocol.Items.AddRange(new object[] { "MASQUE", "WireGuard" });
-        _cmbProtocol.SelectedIndexChanged += (_, _) =>
-        {
-            if (_reloadingEndpoints) return;
-            ReloadEndpointList();
-        };
-        _cmbProtocol.SelectedIndex = 0; // MASQUE first under censorship
-
-        StyleBtn(_btnConnect, "Connect", new Point(12, 140), 110);
-        StyleBtn(_btnDisconnect, "Disconnect", new Point(128, 140), 90);
-        StyleBtn(_btnCancel, "Cancel", new Point(224, 140), 70);
-        StyleBtn(_btnMinimize, "Minimize", new Point(300, 140), 80);
-        StyleBtn(_btnInstall, "Get WARP…", new Point(386, 140), 100);
-        StyleBtn(_btnHelp, "Help", new Point(492, 140), 64);
-        _btnCancel.Enabled = false;
-        _btnConnect.Click += async (_, _) => await ConnectAsync();
-        _btnDisconnect.Click += async (_, _) => await DisconnectAsync();
-        _btnCancel.Click += (_, _) => { try { _cts?.Cancel(); } catch { } };
-        _btnMinimize.Click += (_, _) => { WindowState = FormWindowState.Minimized; };
-        _btnInstall.Click += (_, _) => OpenLinks.OpenUrl("https://one.one.one.one/");
-        _btnHelp.Click += (_, _) => CustomMessageBox.Show(this, GeoHidePresets.HelpSummary, "GeoHide help",
-            MessageBoxButtons.OK, MessageBoxIcon.Information);
-
-        _chkCensorship.AutoSize = true;
-        _chkCensorship.Location = new Point(12, 176);
-        _chkCensorship.Text = "Censorship mode (Iran) — IRCF + CF scan (try WireGuard; use MASQUE if UDP is blocked)";
-        _chkCensorship.ForeColor = Color.WhiteSmoke;
-        _chkCensorship.BackColor = Color.Transparent;
-        _chkCensorship.Checked = true;
-        _chkCensorship.CheckedChanged += (_, _) => SyncOptionConflicts(fromUser: true);
-
-        _chkDpiAssist.AutoSize = true;
-        _chkDpiAssist.Location = new Point(12, 200);
-        _chkDpiAssist.Text = "DPI assist — GoodbyeDPI only during connect (auto-stopped after)";
-        _chkDpiAssist.ForeColor = Color.WhiteSmoke;
-        _chkDpiAssist.BackColor = Color.Transparent;
-        _chkDpiAssist.Checked = true;
-
-        _chkLowLatency.AutoSize = true;
-        _chkLowLatency.Location = new Point(12, 224);
-        _chkLowLatency.Text = "Low latency — stop DPI after connect (keeps WARP DNS; Iran excludes off for stability)";
-        _chkLowLatency.ForeColor = Color.WhiteSmoke;
-        _chkLowLatency.BackColor = Color.Transparent;
-        _chkLowLatency.Checked = true;
-        _chkLowLatency.CheckedChanged += (_, _) => SyncOptionConflicts(fromUser: true);
-
-        _lblPreset.AutoSize = true;
-        _lblPreset.Location = new Point(12, 256);
-        _lblPreset.Text = "Rules preset";
-        _cmbPreset.Location = new Point(100, 252);
-        _cmbPreset.Size = new Size(260, 28);
-        _cmbPreset.DropDownStyle = ComboBoxStyle.DropDownList;
-        StyleCombo(_cmbPreset);
-        _cmbPreset.Items.AddRange(new object[]
-        {
-            "Shecan anti-sanction (web/dev)",
-            "Via upstream proxy",
-            "Gaming Smart DNS template"
-        });
-        _cmbPreset.SelectedIndex = 0;
-        StyleBtn(_btnImportPreset, "Import into Rules", new Point(372, 250), 150);
-        _btnImportPreset.Click += async (_, _) => await ImportSelectedPresetAsync(silent: false);
-
-        _chkImportAfterConnect.AutoSize = true;
-        _chkImportAfterConnect.Location = new Point(12, 286);
-        _chkImportAfterConnect.Text = "Also import selected preset after successful connect";
-        _chkImportAfterConnect.ForeColor = Color.WhiteSmoke;
-        _chkImportAfterConnect.BackColor = Color.Transparent;
-        _chkImportAfterConnect.Checked = false;
-
-        _log.Location = new Point(12, 314);
-        _log.Size = new Size(616, 216);
-        _log.Multiline = true;
-        _log.ScrollBars = ScrollBars.Vertical;
-        _log.ReadOnly = true;
-        _log.BackColor = Color.FromArgb(24, 24, 24);
-        _log.ForeColor = Color.Gainsboro;
-        _log.BorderStyle = BorderStyle.FixedSingle;
-
-        _lblFoot.AutoSize = false;
-        _lblFoot.Location = new Point(12, 538);
-        _lblFoot.Size = new Size(616, 44);
-        _lblFoot.Text = "Preflight checks Iran IP / other VPNs and starts CloudflareWARP if stopped. Options are complementary: DPI only for handshake; low-latency after connect.";
-
-        Controls.AddRange(new Control[]
-        {
-            _lblHelp, _lblStatus, _lblIp, _btnRefresh,
-            _lblEp, _cmbEndpoint, _lblProto, _cmbProtocol,
-            _btnConnect, _btnDisconnect, _btnCancel, _btnMinimize, _btnInstall, _btnHelp,
-            _chkCensorship, _chkDpiAssist, _chkLowLatency,
-            _lblPreset, _cmbPreset, _btnImportPreset, _chkImportAfterConnect,
-            _log, _lblFoot
-        });
-
-        foreach (Control c in Controls)
-        {
-            if (c is Label lbl)
-            {
-                lbl.ForeColor = Color.WhiteSmoke;
-                lbl.BackColor = Color.Transparent;
-            }
-        }
-
-        ResumeLayout(true);
         ReloadEndpointList();
         SyncOptionConflicts(fromUser: false);
 
@@ -218,12 +74,231 @@ public class FormGeoHideWarp : Form
             try { _cts?.Cancel(); } catch { }
             try { _cts?.Dispose(); } catch { }
             _cts = null;
+            _tips.Dispose();
         };
+    }
+
+    private void BuildLayout()
+    {
+        var root = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 5,
+            Padding = new Padding(12),
+        };
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 108)); // header
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));  // endpoint row
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));  // actions
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 78));  // options
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // log
+
+        // ---- Header status strip ----
+        _pnlHeader.Dock = DockStyle.Fill;
+        _pnlHeader.Padding = new Padding(14, 10, 14, 10);
+
+        _lblBrand.AutoSize = true;
+        _lblBrand.Text = "GeoHide";
+        _lblBrand.Font = new Font("Segoe UI Semibold", 16F, FontStyle.Bold);
+        _lblBrand.Location = new Point(14, 8);
+
+        _lblTagline.AutoSize = true;
+        _lblTagline.Text = "Cloudflare exit for games & remotes · official warp-cli";
+        _lblTagline.Location = new Point(14, 38);
+
+        _lblStatus.AutoSize = false;
+        _lblStatus.Text = "Status: …";
+        _lblStatus.AutoEllipsis = true;
+        _lblStatus.SetBounds(14, 62, 520, 18);
+
+        _lblIp.AutoSize = false;
+        _lblIp.Text = "Public IP: …";
+        _lblIp.AutoEllipsis = true;
+        _lblIp.SetBounds(14, 80, 520, 18);
+
+        _lblHealth.AutoSize = false;
+        _lblHealth.Text = _lastHealthSummary;
+        _lblHealth.AutoEllipsis = true;
+        _lblHealth.TextAlign = ContentAlignment.TopRight;
+        _lblHealth.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        _lblHealth.SetBounds(540, 62, 150, 36);
+
+        StyleBtn(_btnRefresh, "Refresh", 88);
+        _btnRefresh.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        _btnRefresh.Location = new Point(600, 12);
+        _btnRefresh.Click += async (_, _) =>
+        {
+            try { await RefreshStatusAsync(fromUser: true).ConfigureAwait(true); }
+            catch (Exception ex) { Log("Refresh error: " + ex.Message); }
+        };
+
+        _pnlHeader.Controls.AddRange(new Control[]
+        {
+            _lblBrand, _lblTagline, _lblStatus, _lblIp, _lblHealth, _btnRefresh
+        });
+        _pnlHeader.Resize += (_, _) =>
+        {
+            int w = Math.Max(200, _pnlHeader.ClientSize.Width - 28 - 160);
+            _lblStatus.Width = w;
+            _lblIp.Width = w;
+            _lblHealth.Left = _pnlHeader.ClientSize.Width - 14 - _lblHealth.Width;
+            _btnRefresh.Left = _pnlHeader.ClientSize.Width - 14 - _btnRefresh.Width;
+        };
+
+        // ---- Endpoint / protocol ----
+        var rowEp = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 4,
+            RowCount = 1,
+        };
+        rowEp.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
+        rowEp.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        rowEp.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 64));
+        rowEp.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
+
+        _lblEp.Text = "Endpoint";
+        _lblEp.Dock = DockStyle.Fill;
+        _lblEp.TextAlign = ContentAlignment.MiddleLeft;
+        _cmbEndpoint.Dock = DockStyle.Fill;
+        _cmbEndpoint.DropDownStyle = ComboBoxStyle.DropDown;
+        StyleCombo(_cmbEndpoint);
+
+        _lblProto.Text = "Protocol";
+        _lblProto.Dock = DockStyle.Fill;
+        _lblProto.TextAlign = ContentAlignment.MiddleLeft;
+        _cmbProtocol.Dock = DockStyle.Fill;
+        _cmbProtocol.DropDownStyle = ComboBoxStyle.DropDownList;
+        StyleCombo(_cmbProtocol);
+        _cmbProtocol.Items.AddRange(new object[] { "MASQUE", "WireGuard" });
+        _cmbProtocol.SelectedIndexChanged += (_, _) =>
+        {
+            if (_reloadingEndpoints) return;
+            ReloadEndpointList();
+        };
+        _cmbProtocol.SelectedIndex = 0;
+
+        rowEp.Controls.Add(_lblEp, 0, 0);
+        rowEp.Controls.Add(_cmbEndpoint, 1, 0);
+        rowEp.Controls.Add(_lblProto, 2, 0);
+        rowEp.Controls.Add(_cmbProtocol, 3, 0);
+
+        // ---- Actions ----
+        var rowAct = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Padding = new Padding(0, 4, 0, 0),
+        };
+        StyleBtn(_btnConnect, "Connect", 100);
+        StyleBtn(_btnDisconnect, "Disconnect", 96);
+        StyleBtn(_btnCancel, "Cancel", 72);
+        StyleBtn(_btnMinimize, "Minimize", 84);
+        StyleBtn(_btnInstall, "Get WARP…", 96);
+        StyleBtn(_btnLogs, "Open logs", 88);
+        StyleBtn(_btnHelp, "Help", 64);
+        _btnCancel.Enabled = false;
+
+        _btnConnect.Click += async (_, _) => await ConnectAsync();
+        _btnDisconnect.Click += async (_, _) => await DisconnectAsync();
+        _btnCancel.Click += (_, _) => { try { _cts?.Cancel(); } catch { } };
+        _btnMinimize.Click += (_, _) => { WindowState = FormWindowState.Minimized; };
+        _btnInstall.Click += (_, _) => OpenLinks.OpenUrl("https://one.one.one.one/");
+        _btnHelp.Click += (_, _) => CustomMessageBox.Show(this, GeoHidePresets.HelpSummary, "GeoHide help",
+            MessageBoxButtons.OK, MessageBoxIcon.Information);
+        _btnLogs.Click += (_, _) => OpenLogsFolder();
+
+        rowAct.Controls.AddRange(new Control[]
+        {
+            _btnConnect, _btnDisconnect, _btnCancel, _btnMinimize, _btnInstall, _btnLogs, _btnHelp
+        });
+
+        // ---- Options ----
+        var rowOpt = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            Padding = new Padding(0, 2, 0, 0),
+        };
+
+        _chkCensorship.AutoSize = true;
+        _chkCensorship.Text = "Iran mode";
+        _chkCensorship.Checked = true;
+        _chkCensorship.CheckedChanged += (_, _) => SyncOptionConflicts(fromUser: true);
+        _tips.SetToolTip(_chkCensorship, "IRCF + Cloudflare scan, MASQUE h2-only, Light DPI (proven path under Iranian DPI).");
+
+        _chkDpiAssist.AutoSize = true;
+        _chkDpiAssist.Text = "DPI assist";
+        _chkDpiAssist.Checked = true;
+        _tips.SetToolTip(_chkDpiAssist, "GoodbyeDPI during connect: fake TTL / wrong-seq packets (survives TCP reassembly) then Light fragment. Auto-stopped after connect.");
+
+        _chkLowLatency.AutoSize = true;
+        _chkLowLatency.Text = "Low latency";
+        _chkLowLatency.Checked = true;
+        _chkLowLatency.CheckedChanged += (_, _) => SyncOptionConflicts(fromUser: true);
+        _tips.SetToolTip(_chkLowLatency, "Stop DPI after connect; keep WARP DNS; Iran excludes off for stability.");
+
+        rowOpt.Controls.AddRange(new Control[] { _chkCensorship, _chkDpiAssist, _chkLowLatency });
+
+        // ---- Log ----
+        _log.Dock = DockStyle.Fill;
+        _log.Multiline = true;
+        _log.ScrollBars = ScrollBars.Vertical;
+        _log.ReadOnly = true;
+        _log.BorderStyle = BorderStyle.FixedSingle;
+        _log.Font = new Font("Consolas", 9F);
+
+        root.Controls.Add(_pnlHeader, 0, 0);
+        root.Controls.Add(rowEp, 0, 1);
+        root.Controls.Add(rowAct, 0, 2);
+        root.Controls.Add(rowOpt, 0, 3);
+        root.Controls.Add(_log, 0, 4);
+
+        Controls.Add(root);
+    }
+
+    private void ApplyHeaderStyle()
+    {
+        _pnlHeader.BackColor = Color.FromArgb(28, 36, 48);
+        _lblBrand.ForeColor = Color.White;
+        _lblBrand.BackColor = Color.Transparent;
+        _lblTagline.ForeColor = Color.FromArgb(160, 190, 220);
+        _lblTagline.BackColor = Color.Transparent;
+        _lblStatus.ForeColor = Color.WhiteSmoke;
+        _lblStatus.BackColor = Color.Transparent;
+        _lblIp.ForeColor = Color.Gainsboro;
+        _lblIp.BackColor = Color.Transparent;
+        _lblHealth.ForeColor = Color.FromArgb(120, 200, 160);
+        _lblHealth.BackColor = Color.Transparent;
+        _btnRefresh.BorderColor = Color.DodgerBlue;
+    }
+
+    private void OpenLogsFolder()
+    {
+        try
+        {
+            string? path = WarpSessionLog.CurrentLogPath;
+            string dir = !string.IsNullOrEmpty(path)
+                ? Path.GetDirectoryName(path)!
+                : Path.Combine(SecureDNS.UserDataDirPath, "GeoHideLogs");
+            FileDirectory.CreateEmptyDirectory(dir);
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = dir,
+                UseShellExecute = true,
+            });
+            Log("Opened log folder: " + dir);
+        }
+        catch (Exception ex)
+        {
+            Log("Open logs failed: " + ex.Message);
+        }
     }
 
     private void SyncOptionConflicts(bool fromUser)
     {
-        // Censorship pairs well with DPI assist; do NOT force MASQUE — user may prefer WireGuard.
         if (_chkCensorship.Checked && fromUser && !_chkDpiAssist.Checked)
             _chkDpiAssist.Checked = true;
     }
@@ -242,29 +317,20 @@ public class FormGeoHideWarp : Form
         foreach (string n in report.Notes) Log(n);
         foreach (string w in report.Warnings) Log("WARN: " + w);
 
-        // Auto-tune options from geo — keep protocol choice (MASQUE vs WireGuard) as the user set it.
         if (report.LikelyIran)
         {
-            _chkCensorship.Checked = true;
-            _chkDpiAssist.Checked = true;
-            SyncOptionConflicts(fromUser: false);
+            Log("Iran detected — leave Iran mode on for DPI scan, or uncheck it for a simple Cloudflare default connect.");
             if (string.Equals(_cmbProtocol.SelectedItem?.ToString(), "WireGuard", StringComparison.OrdinalIgnoreCase))
-                Log("Iran detected — WireGuard selected. If UDP is blocked by DPI, switch Protocol to MASQUE.");
-            else
-                Log("Iran detected — MASQUE is usually more reliable under DPI; WireGuard is available in Protocol.");
+                Log("WireGuard selected. If UDP is blocked, switch Protocol to MASQUE.");
         }
         else if (!report.AlreadyOnWarp && !string.IsNullOrEmpty(report.Loc))
         {
-            // Outside IR and not on WARP — censorship scan is unnecessary overhead
-            Log("Tip: not in IR — uncheck Censorship mode for a much faster Connect.");
+            Log("Tip: not in IR — uncheck Iran mode for a faster Connect.");
         }
 
         if (report.OtherVpnLikely)
         {
-            CustomMessageBox.Show(this,
-                "Another VPN/tunnel appears active (" + report.OtherVpnHint + ").\n\n" +
-                "Disconnect it before GeoHide Connect, or WARP will fight it (slow/fail/high latency).",
-                "VPN conflict", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Log("WARN: Another VPN/tunnel appears active (" + report.OtherVpnHint + "). Disconnect it before Connect.");
         }
 
         await RefreshStatusAsync().ConfigureAwait(true);
@@ -272,17 +338,8 @@ public class FormGeoHideWarp : Form
 
     private static void StyleCombo(ComboBox c)
     {
-        c.BackColor = Color.FromArgb(45, 45, 45);
-        c.ForeColor = Color.White;
         c.FlatStyle = FlatStyle.Flat;
     }
-
-    private GeoHidePresets.PresetKind SelectedPresetKind() => _cmbPreset.SelectedIndex switch
-    {
-        1 => GeoHidePresets.PresetKind.ViaUpstreamProxy,
-        2 => GeoHidePresets.PresetKind.GamingSmartDns,
-        _ => GeoHidePresets.PresetKind.AntiSanctionShecanShelter
-    };
 
     private void ReloadEndpointList()
     {
@@ -306,16 +363,15 @@ public class FormGeoHideWarp : Form
         finally { _reloadingEndpoints = false; }
     }
 
-    private static void StyleBtn(CustomButton b, string text, Point loc, int width)
+    private static void StyleBtn(CustomButton b, string text, int width)
     {
         b.Text = text;
-        b.Location = loc;
-        b.Size = new Size(width, 28);
+        b.Size = new Size(width, 30);
+        b.Margin = new Padding(0, 0, 6, 0);
         b.BorderColor = Color.DodgerBlue;
         b.FlatStyle = FlatStyle.Flat;
         b.RoundedCorners = 5;
-        b.ForeColor = Color.White;
-        b.BackColor = Color.FromArgb(50, 50, 50);
+        b.SelectionColor = Color.LightBlue;
     }
 
     private void Log(string msg)
@@ -332,21 +388,38 @@ public class FormGeoHideWarp : Form
         catch { }
     }
 
+    private void SetHealthUi(string summary, bool ok)
+    {
+        try
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(() => SetHealthUi(summary, ok));
+                return;
+            }
+            _lastHealthSummary = summary;
+            _lblHealth.Text = summary;
+            _lblHealth.ForeColor = ok
+                ? Color.FromArgb(120, 200, 160)
+                : Color.FromArgb(230, 160, 100);
+        }
+        catch { }
+    }
+
     private void SetBusy(bool busy)
     {
         _busy = busy;
         _btnConnect.Enabled = !busy;
         _btnDisconnect.Enabled = !busy;
         _btnRefresh.Enabled = !busy;
-        _btnImportPreset.Enabled = !busy;
         _btnCancel.Enabled = busy;
         _cmbEndpoint.Enabled = !busy;
         _cmbProtocol.Enabled = !busy;
-        _cmbPreset.Enabled = !busy;
         _chkCensorship.Enabled = !busy;
         _chkDpiAssist.Enabled = !busy;
         _chkLowLatency.Enabled = !busy;
-        _btnMinimize.Enabled = true; // always allow minimize
+        _btnMinimize.Enabled = true;
+        _btnLogs.Enabled = true;
     }
 
     private async Task RefreshStatusAsync(bool fromUser = false)
@@ -369,7 +442,6 @@ public class FormGeoHideWarp : Form
                 return;
             }
 
-            // User Refresh should try to wake a stopped service (same as Connect preflight).
             if (fromUser && !WarpCli.IsServiceRunning())
             {
                 _lblStatus.Text = "Status: starting WARP service…";
@@ -397,9 +469,9 @@ public class FormGeoHideWarp : Form
 
             var info = await WarpCli.FetchPublicIpInfoAsync(6000).ConfigureAwait(true);
             string ipPart = info.Ip ?? "unavailable";
-            string warpPart = info.WarpOn == true ? " (warp=on)" : info.WarpOn == false ? " (warp=off)" : " (warp=?)";
-            string locPart = string.IsNullOrEmpty(info.Loc) ? "" : $" [{info.Loc}]";
-            string coloPart = string.IsNullOrEmpty(info.Colo) ? "" : $" colo={info.Colo}";
+            string warpPart = info.WarpOn == true ? " · warp=on" : info.WarpOn == false ? " · warp=off" : " · warp=?";
+            string locPart = string.IsNullOrEmpty(info.Loc) ? "" : $" · {info.Loc}";
+            string coloPart = string.IsNullOrEmpty(info.Colo) ? "" : $" · colo {info.Colo}";
             _lblIp.Text = "Public IP: " + ipPart + warpPart + locPart + coloPart;
 
             if (fromUser)
@@ -430,6 +502,7 @@ public class FormGeoHideWarp : Form
         {
             var r = await Task.Run(() => WarpCli.Disconnect()).ConfigureAwait(true);
             Log(r.Ok ? "Disconnected." : "Disconnect: " + r.ErrorLine);
+            SetHealthUi("Health: idle", true);
             await RefreshStatusAsync().ConfigureAwait(true);
         }
         finally { SetBusy(false); }
@@ -451,6 +524,7 @@ public class FormGeoHideWarp : Form
         _lastOpt = opt;
         _watchCts = new CancellationTokenSource();
         CancellationToken ct = _watchCts.Token;
+        SetHealthUi("Health: watching…", true);
         _ = Task.Run(async () =>
         {
             try { await LinkWatchLoopAsync(ct).ConfigureAwait(false); }
@@ -465,13 +539,12 @@ public class FormGeoHideWarp : Form
                 catch { }
             }
         }, ct);
-        Log("Health watch started — will rotate endpoints if quality drops or times out.");
+        Log("Health watch started — rotates endpoints if quality drops.");
     }
 
     private async Task LinkWatchLoopAsync(CancellationToken ct)
     {
         int fails = 0;
-        // First check after ~25s — late DPI timeouts often show up here.
         await Task.Delay(25_000, ct).ConfigureAwait(false);
 
         while (!ct.IsCancellationRequested)
@@ -479,6 +552,7 @@ public class FormGeoHideWarp : Form
             if (!WarpCli.IsConnected(WarpCli.Status()))
             {
                 fails++;
+                SetHealthUi($"Health: down ({fails}/2)", false);
                 UiLog($"Health: tunnel not Connected (fail {fails}/2).");
             }
             else
@@ -488,11 +562,13 @@ public class FormGeoHideWarp : Form
                 if (q.Ok)
                 {
                     fails = 0;
+                    SetHealthUi($"Health: OK · {q.MedianRttMs} ms", true);
                     UiLog($"Health: OK (med={q.MedianRttMs}ms dl={q.DownloadMs}ms).");
                 }
                 else
                 {
                     fails++;
+                    SetHealthUi($"Health: weak ({fails}/2)", false);
                     UiLog($"Health: WEAK — {q.Reason} (fail {fails}/2).");
                 }
             }
@@ -500,9 +576,10 @@ public class FormGeoHideWarp : Form
             if (fails >= 2)
             {
                 fails = 0;
+                SetHealthUi("Health: rotating…", false);
                 UiLog("Health: rotating to another address…");
                 await RotateFromWatchAsync().ConfigureAwait(false);
-                return; // RotateUi restarts a fresh watch on success
+                return;
             }
 
             await Task.Delay(20_000, ct).ConfigureAwait(false);
@@ -532,9 +609,9 @@ public class FormGeoHideWarp : Form
         var opt = _lastOpt ?? new WarpCli.CensorshipOptions
         {
             Enabled = true,
-            DpiAssist = false,
+            DpiAssist = true,
             LowLatency = true,
-            RequireLinkQuality = true,
+            RequireLinkQuality = false,
             MaxConnectAttempts = 10,
         };
 
@@ -566,6 +643,20 @@ public class FormGeoHideWarp : Form
                 WarpSessionLog.Step("ui", msg);
             });
 
+            // Restart FakeTTL DPI for rotate under censorship — handshake often needs it again
+            var rotateOpt = opt;
+            if (opt.Enabled && opt.DpiAssist)
+            {
+                var (dpiOk, dpiMsg) = await WarpDpiAssist.StartProfileAsync(
+                    MasqueDpiProfile.FakeTtl, progress).ConfigureAwait(true);
+                Log(dpiMsg);
+                if (!dpiOk) Log("Rotate continuing without DPI…");
+            }
+            else
+            {
+                rotateOpt = opt with { DpiAssist = false };
+            }
+
             WarpSessionLog.BeginSession("health-rotate",
                 new Dictionary<string, object?>
                 {
@@ -574,7 +665,9 @@ public class FormGeoHideWarp : Form
                 });
 
             var (ok, message, ep, usedProtocol) = await WarpCli.RotateToNextEndpointAsync(
-                from, proto, opt with { DpiAssist = false }, progress, rotateCts.Token).ConfigureAwait(true);
+                from, proto, rotateOpt with { DpiAssist = false }, progress, rotateCts.Token).ConfigureAwait(true);
+
+            try { await WarpDpiAssist.StopAsync().ConfigureAwait(true); } catch { }
 
             Log(message);
             WarpSessionLog.End(ok, message,
@@ -595,7 +688,8 @@ public class FormGeoHideWarp : Form
             }
             else
             {
-                Log("Failover failed — tunnel may be down. Press Connect to rescan.");
+                Log("Failover failed — press Connect to rescan.");
+                SetHealthUi("Health: failed", false);
                 _activeEndpoint = null;
             }
             done.TrySetResult(ok);
@@ -603,12 +697,14 @@ public class FormGeoHideWarp : Form
         catch (OperationCanceledException)
         {
             WarpSessionLog.End(false, "rotate cancelled");
+            try { await WarpDpiAssist.StopAsync().ConfigureAwait(true); } catch { }
             done.TrySetResult(false);
         }
         catch (Exception ex)
         {
             Log("Rotate error: " + ex.Message);
             WarpSessionLog.End(false, "rotate exception: " + ex.Message);
+            try { await WarpDpiAssist.StopAsync().ConfigureAwait(true); } catch { }
             done.TrySetResult(false);
         }
         finally
@@ -622,9 +718,7 @@ public class FormGeoHideWarp : Form
         if (_busy) return;
         if (!WarpCli.IsInstalled())
         {
-            CustomMessageBox.Show(this,
-                "Install Cloudflare WARP first (includes warp-cli), then reopen this window.",
-                "WARP required", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Log("Install Cloudflare WARP first (Get WARP…), then retry Connect.");
             OpenLinks.OpenUrl("https://one.one.one.one/");
             return;
         }
@@ -641,14 +735,12 @@ public class FormGeoHideWarp : Form
         bool sessionEnded = false;
         try
         {
-            // Fresh preflight every connect — start service, warn on VPN / existing WARP
             var pre = await WarpPreflight.RunAsync(progress, _cts.Token).ConfigureAwait(true);
             foreach (string w in pre.Warnings) Log("WARN: " + w);
 
             if (!pre.ServiceRunning)
             {
-                CustomMessageBox.Show(this, pre.Warnings.FirstOrDefault() ?? "WARP service not running.",
-                    "WARP service", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Log(pre.Warnings.FirstOrDefault() ?? "WARP service not running.");
                 return;
             }
 
@@ -668,18 +760,13 @@ public class FormGeoHideWarp : Form
             bool dpi = _chkDpiAssist.Checked;
             bool lowLatency = _chkLowLatency.Checked;
 
-            // Iran → force censorship path
-            if (pre.LikelyIran)
-            {
-                censorship = true;
-                dpi = true;
-            }
-
-            if (!censorship && !pre.LikelyIran)
-                Log("Fast path: censorship off.");
+            // Honor the checkboxes — never re-check Iran mode on Connect.
+            if (pre.LikelyIran && !censorship)
+                Log("Iran detected, but Iran mode is off — Cloudflare default only (no IP scan).");
+            else if (!censorship)
+                Log("Iran mode off — Cloudflare default connect.");
 
             SyncOptionConflicts(fromUser: false);
-            // Honor Protocol combo always — censorship no longer forces MASQUE.
             string protocol = _cmbProtocol.SelectedItem?.ToString() ?? "MASQUE";
             if (censorship && protocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase))
                 Log("Protocol: WireGuard (UDP). If connect fails under DPI, switch to MASQUE.");
@@ -711,22 +798,20 @@ public class FormGeoHideWarp : Form
                 LowLatency = lowLatency,
                 TryWireGuardUpgrade = false,
                 ApplyIranExcludes = false,
-                RequireLinkQuality = true,
+                RequireLinkQuality = !censorship,
                 MaxCandidates = censorship ? 48 : 24,
-                // More attempts: quality rejects should still leave room to try other addresses
-                MaxConnectAttempts = censorship ? 12 : 8,
+                MaxConnectAttempts = censorship ? 14 : 8,
                 CidrSamplePerRange = censorship ? 12 : 8,
-                ProbeTimeoutMs = 350,
+                ProbeTimeoutMs = 400,
             };
             _lastOpt = opt;
 
-            // One Connect path: censorship/empty → scan; otherwise use the Endpoint box.
             List<string>? endpointList;
-            if (censorship || !hasSpecific)
+            if (!hasSpecific)
             {
                 endpointList = null;
                 Log(censorship
-                    ? "Connect: scan → quality gate → failover if weak…"
+                    ? "Connect: Cloudflare default (MASQUE/WG). Forced IPs skipped — they break warp-cli 2026."
                     : "Connecting with Cloudflare default…");
             }
             else
@@ -763,18 +848,13 @@ public class FormGeoHideWarp : Form
             if (ok)
             {
                 StartLinkWatch(ep, usedProtocol, opt);
-                if (_chkImportAfterConnect.Checked)
-                    await ImportSelectedPresetAsync(silent: true).ConfigureAwait(true);
-                CustomMessageBox.Show(this,
-                    message + "\n\nHealth watch is on — weak/timeout links auto-rotate to other addresses.\nMinimize anytime — WARP stays connected.\n\nLog: " +
-                    (WarpSessionLog.CurrentLogPath ?? "(see UserData/GeoHideLogs)"),
-                    "GeoHide", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                Log("Connected — remotes should see a Cloudflare IP. Minimize anytime; WARP stays up.");
+                SetHealthUi("Health: watching…", true);
             }
             else
             {
-                CustomMessageBox.Show(this,
-                    message + "\n\nLog: " + (WarpSessionLog.CurrentLogPath ?? "(see UserData/GeoHideLogs)"),
-                    "GeoHide", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                SetHealthUi("Health: idle", true);
+                Log("Connect failed — see log above, or Open logs for the session file.");
             }
         }
         catch (OperationCanceledException)
@@ -804,25 +884,6 @@ public class FormGeoHideWarp : Form
         finally
         {
             SetBusy(false);
-        }
-    }
-
-    private async Task ImportSelectedPresetAsync(bool silent)
-    {
-        try
-        {
-            var kind = SelectedPresetKind();
-            var (ok, message) = await GeoHidePresets.ImportIntoRulesAsync(kind, merge: true).ConfigureAwait(true);
-            Log(message);
-            if (Application.OpenForms["FormMain"] is FormMain main)
-                await main.EnableRulesSettingAndReapplyAsync().ConfigureAwait(true);
-            if (!silent)
-                CustomMessageBox.Show(this, message, ok ? "Rules" : "Rules error",
-                    MessageBoxButtons.OK, ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
-        }
-        catch (Exception ex)
-        {
-            Log("Preset import: " + ex.Message);
         }
     }
 }

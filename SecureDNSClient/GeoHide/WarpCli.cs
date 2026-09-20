@@ -2,7 +2,9 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
 using System.Text;
 using System.Text.Json;
 
@@ -11,8 +13,7 @@ namespace SecureDNSClient.GeoHide;
 /// <summary>
 /// Thin wrapper around Cloudflare's official <c>warp-cli</c>, inspired by
 /// https://github.com/saeedmasoudie/pywarp (endpoint set, protocol, connect).
-/// Censorship mode draws on IRCF endpoints, patterniha CF scanning (TCP not ICMP),
-/// and GFW-knocker-style TLS fragmentation via <see cref="WarpDpiAssist"/>.
+/// Censorship mode: MASQUE h2 + GoodbyeDPI fake-TTL/wrong-seq (TCP reassembly-resistant).
 /// </summary>
 public static class WarpCli
 {
@@ -66,7 +67,7 @@ public static class WarpCli
     private static HttpClient CreateHttpClient()
     {
         HttpClient c = new() { Timeout = TimeSpan.FromSeconds(12) };
-        c.DefaultRequestHeaders.UserAgent.ParseAdd("DNSveil-GeoHide/3.5");
+        c.DefaultRequestHeaders.UserAgent.ParseAdd("DNSveil-GeoHide/3.6");
         return c;
     }
 
@@ -101,8 +102,8 @@ public static class WarpCli
         /// Default false: those excludes often cause weak/jittery sessions under MASQUE+DPI.
         /// </summary>
         public bool ApplyIranExcludes { get; init; } = false;
-        public int MaxCandidates { get; init; } = 48;
-        public int MaxConnectAttempts { get; init; } = 8;
+        public int MaxCandidates { get; init; } = 80;
+        public int MaxConnectAttempts { get; init; } = 16;
         public int ProbeTimeoutMs { get; init; } = 400;
         public int CidrSamplePerRange { get; init; } = 16;
         /// <summary>Reject Connected endpoints that fail RTT/download quality (rotate to next).</summary>
@@ -188,7 +189,8 @@ public static class WarpCli
         }
         catch
         {
-            return true;
+            // Fail closed — unknown service state must not look "running"
+            return false;
         }
     }
 
@@ -246,12 +248,299 @@ public static class WarpCli
     public static Result Disconnect() => Run("disconnect");
     public static Result Status() => Run("status");
     public static Result SetModeWarp() => Run("mode", "warp");
+    /// <summary>Tunnel + DoH — sometimes more reliable when plain warp DNS path flaps under DPI.</summary>
+    public static Result SetModeWarpDoh() => Run("mode", "warp+doh");
     /// <summary>Tunnel without WARP DNS proxy — lower overhead when DNSveil already handles DNS.</summary>
     public static Result SetModeTunnelOnly() => Run("mode", "tunnel_only");
     public static Result SetProtocol(string protocol) => Run("tunnel", "protocol", "set", protocol);
     public static Result SetMasqueOptions(string options) => Run("tunnel", "masque-options", "set", options);
     public static Result SetEndpoint(string endpoint) => Run("tunnel", "endpoint", "set", endpoint);
     public static Result ResetEndpoint() => Run("tunnel", "endpoint", "reset");
+    public static Result ResetProtocol() => Run("tunnel", "protocol", "reset");
+
+    /// <summary>
+    /// warp-cli IPC is a named pipe. After CloudflareWARP start/restart the service
+    /// can be Running while the daemon socket is not there yet (os error 2).
+    /// </summary>
+    public static async Task<bool> WaitForDaemonAsync(int timeoutMs, CancellationToken ct)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            ct.ThrowIfCancellationRequested();
+            Result st = Status();
+            string t = st.Combined ?? "";
+            bool missing =
+                t.Contains("Unable to connect to the CloudflareWARP daemon", StringComparison.OrdinalIgnoreCase) ||
+                t.Contains("Maybe the daemon is not running", StringComparison.OrdinalIgnoreCase) ||
+                t.Contains("os error 2", StringComparison.OrdinalIgnoreCase);
+            if (!missing && (st.Ok || t.Contains("Status update:", StringComparison.OrdinalIgnoreCase)))
+                return true;
+            await Task.Delay(400, ct).ConfigureAwait(false);
+        }
+        return false;
+    }
+
+    private static string? _expectProtocol;
+    public static bool LastHandshakeUsedWireGuardPort { get; private set; }
+
+    /// <summary>What warp-cli settings currently list as the tunnel protocol.</summary>
+    public static string ReadEffectiveProtocol()
+    {
+        Result s = Run("settings", "list");
+        foreach (string line in s.Combined.Split('\n'))
+        {
+            string t = line.Trim();
+            if (!t.Contains("tunnel protocol", StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (t.Contains("MASQUE", StringComparison.OrdinalIgnoreCase)) return "MASQUE";
+            if (t.Contains("WireGuard", StringComparison.OrdinalIgnoreCase)) return "WireGuard";
+        }
+        return "";
+    }
+
+    private static bool LooksLikeWireGuardHandshake(string statusRaw) =>
+        statusRaw.Contains(":2408", StringComparison.OrdinalIgnoreCase);
+
+    private static string ExtractStatusReason(string statusRaw)
+    {
+        foreach (string line in statusRaw.Split('\n'))
+        {
+            string t = line.Trim();
+            int idx = t.IndexOf("Reason:", StringComparison.OrdinalIgnoreCase);
+            if (idx >= 0) return t[idx..].Trim();
+            if (t.Contains("happy eyeballs", StringComparison.OrdinalIgnoreCase))
+                return t;
+        }
+        return "";
+    }
+
+    private static void ApplyTunnelPrefs(string protocol, string? masqueOptions, IProgress<string>? progress)
+    {
+        LastHandshakeUsedWireGuardPort = false;
+        _expectProtocol = protocol;
+
+        // 2026.6 default is MASQUE; a leftover WireGuard consumer-override can ignore a bare `set`.
+        if (protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
+        {
+            Result rst = ResetProtocol();
+            WarpSessionLog.Cli("tunnel protocol reset", rst, always: true);
+            Thread.Sleep(350);
+        }
+
+        Result p = SetProtocol(protocol);
+        WarpSessionLog.Cli("tunnel protocol set " + protocol, p, always: true);
+        if (!p.Ok) progress?.Report("WARN protocol set: " + p.ErrorLine);
+        if (protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(masqueOptions))
+        {
+            Result m = SetMasqueOptions(masqueOptions);
+            WarpSessionLog.Cli("tunnel masque-options set " + masqueOptions, m, always: true);
+            if (!m.Ok) progress?.Report("WARN masque-options: " + m.ErrorLine);
+        }
+
+        Thread.Sleep(600);
+        string effective = ReadEffectiveProtocol();
+        WarpSessionLog.Step("protocol", "effective " + (string.IsNullOrEmpty(effective) ? "unknown" : effective),
+            new Dictionary<string, object?> { ["wanted"] = protocol, ["effective"] = effective, ["masque"] = masqueOptions });
+
+        if (string.IsNullOrEmpty(effective))
+            progress?.Report($"Tunnel prefs: {protocol}" + (masqueOptions is null ? "" : " / " + masqueOptions) + " (settings unreadable)");
+        else if (!effective.Equals(protocol, StringComparison.OrdinalIgnoreCase))
+            progress?.Report($"WARN: you chose {protocol} but warp-cli settings still say {effective}");
+        else
+            progress?.Report($"Tunnel prefs: {effective}" + (masqueOptions is null ? "" : " / " + masqueOptions));
+    }
+
+    /// <summary>
+    /// Apply MASQUE in settings. Do not <c>endpoint reset</c> — that loads WireGuard
+    /// 162.159.192.9:2408 even when settings already say MASQUE. Do not bounce the
+    /// service unless the daemon pipe is missing (restart races warp-cli with os error 2).
+    /// </summary>
+    public static async Task<bool> EnsureMasqueAppliedAsync(
+        string masqueOptions,
+        IProgress<string>? progress,
+        CancellationToken ct)
+    {
+        if (!await WaitForDaemonAsync(6000, ct).ConfigureAwait(false))
+        {
+            progress?.Report("warp-cli daemon not ready — restarting CloudflareWARP…");
+            var (ok, msg) = await WarpPreflight.RestartWarpServiceAsync(progress, ct).ConfigureAwait(false);
+            progress?.Report(msg);
+            WarpSessionLog.Step("protocol", "service restart for MASQUE",
+                new Dictionary<string, object?> { ["ok"] = ok, ["msg"] = msg });
+            if (!await WaitForDaemonAsync(15000, ct).ConfigureAwait(false))
+                progress?.Report("WARN: daemon still not answering after restart.");
+        }
+
+        AcceptTos();
+        SetModeWarp();
+        Run("debug", "high-timeouts", "enable");
+        Result cc = Run("debug", "connectivity-check", "disable");
+        WarpSessionLog.Cli("debug connectivity-check disable", cc, always: true);
+        if (cc.Ok) progress?.Report("Connectivity-check off (IPv6 probe was poisoning happy-eyeballs).");
+        await WaitUntilDisconnectedAsync(ct).ConfigureAwait(false);
+        ApplyTunnelPrefs("MASQUE", masqueOptions, progress);
+        await Task.Delay(400, ct).ConfigureAwait(false);
+
+        string eff = ReadEffectiveProtocol();
+        progress?.Report("warp-cli protocol=" + (string.IsNullOrEmpty(eff) ? "unknown" : eff) + " (not resetting endpoint — that forces :2408)");
+        return !eff.Equals("WireGuard", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static readonly string[] MasqueTcpEndpoints =
+    {
+        "162.159.197.1:443",
+        "162.159.197.2:443",
+        "162.159.197.3:443",
+        "162.159.198.1:443",
+        "162.159.198.2:443",
+        "162.159.198.3:443",
+        "188.114.96.1:443",
+        "188.114.97.1:443",
+        "188.114.98.1:443",
+    };
+
+    private static string NormalizeMasqueEndpoint(string endpoint)
+    {
+        endpoint = endpoint.Trim();
+        int colon = endpoint.LastIndexOf(':');
+        if (colon > 0 && int.TryParse(endpoint[(colon + 1)..], out int port))
+        {
+            if (port is 443 or 8443 or 4443)
+                return endpoint;
+            return endpoint[..colon] + ":443";
+        }
+        return endpoint + ":443";
+    }
+
+    private static List<string> BuildMasqueTargetList(
+        IEnumerable<string>? userEndpoints,
+        IEnumerable<string>? extra = null)
+    {
+        var list = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void Add(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return;
+            string e = NormalizeMasqueEndpoint(raw);
+            if (seen.Add(e)) list.Add(e);
+        }
+        if (userEndpoints != null)
+        {
+            foreach (string e in userEndpoints)
+                Add(e);
+        }
+        if (extra != null)
+        {
+            foreach (string e in extra)
+                Add(e);
+        }
+        foreach (string e in MasqueTcpEndpoints)
+            Add(e);
+        return list;
+    }
+
+    private static async Task<string> ProbeTlsAsync(string endpoint, CancellationToken ct)
+    {
+        try
+        {
+            int colon = endpoint.LastIndexOf(':');
+            if (colon <= 0 || !int.TryParse(endpoint[(colon + 1)..], out int port))
+                return "tls-skip";
+            string host = endpoint[..colon];
+            using TcpClient client = new();
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            linked.CancelAfter(4000);
+            await client.ConnectAsync(host, port, linked.Token).ConfigureAwait(false);
+            using SslStream ssl = new(client.GetStream(), false, static (_, _, _, _) => true);
+            var opts = new SslClientAuthenticationOptions
+            {
+                TargetHost = "engage.cloudflareclient.com",
+                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+            };
+            await ssl.AuthenticateAsClientAsync(opts, linked.Token).ConfigureAwait(false);
+            return "tls-ok " + ssl.SslProtocol + "/" + ssl.NegotiatedCipherSuite;
+        }
+        catch (Exception ex)
+        {
+            return "tls-fail " + ex.GetType().Name + ": " + (ex.InnerException?.Message ?? ex.Message);
+        }
+    }
+
+    private static async Task<bool> TcpConnectAsync(string endpoint, int timeoutMs, CancellationToken ct)
+    {
+        try
+        {
+            int colon = endpoint.LastIndexOf(':');
+            if (colon <= 0 || !int.TryParse(endpoint[(colon + 1)..], out int port))
+                return false;
+            string host = endpoint[..colon];
+            using TcpClient client = new();
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            linked.CancelAfter(timeoutMs);
+            await client.ConnectAsync(host, port, linked.Token).ConfigureAwait(false);
+            return client.Connected;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Pin MASQUE HTTP/2 TCP endpoints. Consumer default after <c>endpoint reset</c> is
+    /// WireGuard :2408 even when settings say MASQUE.
+    /// </summary>
+    private static async Task<(bool Ok, string Message, string? Endpoint, string Protocol)?> TryMasqueTcpEndpointsAsync(
+        IReadOnlyList<string> endpoints,
+        string masqueOpt,
+        CensorshipOptions censorship,
+        IProgress<string>? progress,
+        CancellationToken ct,
+        bool skipTcpProbe = false)
+    {
+        progress?.Report($"Pinning MASQUE {masqueOpt} on {endpoints.Count} TCP :443 endpoint(s)…");
+        foreach (string endpoint in endpoints)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!skipTcpProbe)
+            {
+                bool tcp = await TcpConnectAsync(endpoint, 1800, ct).ConfigureAwait(false);
+                WarpSessionLog.Step("probe", tcp ? "tcp-open " + endpoint : "tcp-closed " + endpoint,
+                    new Dictionary<string, object?> { ["endpoint"] = endpoint, ["tcp"] = tcp });
+                if (!tcp)
+                {
+                    progress?.Report($"Skip {endpoint}: TCP not open (blocked or filtered).");
+                    continue;
+                }
+            }
+
+            await WaitUntilDisconnectedAsync(ct).ConfigureAwait(false);
+            ApplyTunnelPrefs("MASQUE", masqueOpt, progress);
+            Result set = SetEndpoint(endpoint);
+            WarpSessionLog.Cli("tunnel endpoint set " + endpoint, set, always: true);
+            if (!set.Ok)
+            {
+                progress?.Report($"Skip {endpoint}: {set.ErrorLine}");
+                continue;
+            }
+            progress?.Report($"MASQUE {masqueOpt} @ {endpoint} (TCP open)…");
+            await Task.Delay(250, ct).ConfigureAwait(false);
+            if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: false, masquePin: true).ConfigureAwait(false) &&
+                await StabilizeConnectedAsync(progress, ct, soft: true).ConfigureAwait(false))
+            {
+                if (LastHandshakeUsedWireGuardPort)
+                {
+                    progress?.Report($"{endpoint} ignored by daemon — still :2408.");
+                    continue;
+                }
+                var accepted = await QualifyOrRejectAsync(
+                    endpoint, "MASQUE", censorship, progress, ct, WarpSessionLog.ElapsedMs, fromCache: false).ConfigureAwait(false);
+                if (accepted != null) return accepted;
+            }
+        }
+        return null;
+    }
 
     public static bool HasRegistration()
     {
@@ -329,6 +618,8 @@ public static class WarpCli
 
     public static IEnumerable<string> EnumerateEndpointCandidates(string protocol = "WireGuard", int maxCount = 24)
     {
+        if (maxCount <= 0) yield break;
+
         bool masque = protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase);
         int[] ports = masque ? MasquePorts : WireGuardPorts.Take(8).ToArray();
 
@@ -521,14 +812,21 @@ public static class WarpCli
             return (false, svcMsg, null, preferredProtocol);
         }
 
-        // DPI assist first — fragment TLS ClientHello so engage/MASQUE H2 is not RST'd on SNI.
-        if (censorship.DpiAssist)
+        // MASQUE :443 is TLS. FakeTTL/WinDivert was mangling that handshake (logs: TCP :443 then Unable).
+        // WireGuard UDP still benefits from DPI up front.
+        bool masquePath = !preferredProtocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase);
+        if (censorship.DpiAssist && !masquePath)
         {
-            var (dpiOk, dpiMsg) = await WarpDpiAssist.StartAsync(progress: progress).ConfigureAwait(false);
+            var (dpiOk, dpiMsg) = await WarpDpiAssist.StartProfileAsync(MasqueDpiProfile.LightFrag, progress).ConfigureAwait(false);
             progress?.Report(dpiMsg);
-            WarpSessionLog.Step("dpi", dpiMsg, new Dictionary<string, object?> { ["ok"] = dpiOk });
+            WarpSessionLog.Step("dpi", dpiMsg, new Dictionary<string, object?> { ["ok"] = dpiOk, ["profile"] = "LightFrag" });
             if (!dpiOk)
                 progress?.Report("Continuing without DPI assist…");
+        }
+        else if (masquePath)
+        {
+            await WarpDpiAssist.StopAsync().ConfigureAwait(false);
+            progress?.Report("MASQUE: IPv4-only handshake first (no TLS split).");
         }
 
         AcceptTos();
@@ -541,12 +839,11 @@ public static class WarpCli
             return (false, "WARP registration failed. Open the official WARP app once (or enable DPI assist), accept the ToS, then retry.", null, preferredProtocol);
         }
 
-        // Under censorship: high-timeouts help both MASQUE and WireGuard handshakes.
         if (censorship.Enabled)
         {
             progress?.Report(preferredProtocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase)
                 ? "Stability: high-timeouts ON (WireGuard UDP path)…"
-                : "Stability: high-timeouts ON + MASQUE h2-only (less QUIC flap under DPI)…");
+                : "Stability: high-timeouts ON + MASQUE h2-only…");
             Result hi = Run("debug", "high-timeouts", "enable");
             WarpSessionLog.Step("mode", "high-timeouts enable",
                 new Dictionary<string, object?>
@@ -565,82 +862,196 @@ public static class WarpCli
                 ["out"] = mode.Combined,
                 ["lowLatency"] = censorship.LowLatency,
             });
+        if (!mode.Ok)
+            progress?.Report("WARN mode warp: " + mode.ErrorLine);
         if (censorship.LowLatency)
-            progress?.Report("Mode: warp + post-connect DPI stop (Iran excludes off by default for stability)…");
+            progress?.Report("Mode: warp + post-connect DPI stop (Iran excludes off by default)…");
+
+        // First shot: Cloudflare default endpoint (no force) — often works when forced IPs hang.
+        if (censorship.Enabled || endpoints == null || !endpoints.Any())
+        {
+            string defProto = preferredProtocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase)
+                ? "WireGuard"
+                : (censorship.Enabled ? "MASQUE" : preferredProtocol);
+
+            if (defProto.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
+            {
+                string masqueOpt = censorship.Enabled ? "h2-only" : "h3-with-h2-fallback";
+                WarpPreflight.Ipv4HandshakeGuard? ipv4 = null;
+                try
+                {
+                    ipv4 = await WarpPreflight.ForceIpv4HandshakeAsync(progress, ct).ConfigureAwait(false);
+                    await EnsureMasqueAppliedAsync(masqueOpt, progress, ct).ConfigureAwait(false);
+
+                    List<string> ircf443 = new();
+                    try
+                    {
+                        foreach (string e in await FetchIrcfEndpointsAsync(ct).ConfigureAwait(false))
+                        {
+                            if (e.EndsWith(":443", StringComparison.Ordinal) ||
+                                e.EndsWith(":8443", StringComparison.Ordinal) ||
+                                e.EndsWith(":4443", StringComparison.Ordinal))
+                                ircf443.Add(e);
+                        }
+                    }
+                    catch { /* IRCF is optional */ }
+
+                    List<string> masqueTargets = BuildMasqueTargetList(endpoints, ircf443);
+                    progress?.Report("MASQUE targets: " + string.Join(", ", masqueTargets.Take(8)) +
+                                     (masqueTargets.Count > 8 ? "…" : ""));
+
+                    var tcpOpen = new List<string>();
+                    foreach (string ep in masqueTargets)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        bool tcp = await TcpConnectAsync(ep, 1800, ct).ConfigureAwait(false);
+                        WarpSessionLog.Step("probe", tcp ? "tcp-open " + ep : "tcp-closed " + ep,
+                            new Dictionary<string, object?> { ["endpoint"] = ep, ["tcp"] = tcp });
+                        if (tcp) tcpOpen.Add(ep);
+                        else progress?.Report($"Skip {ep}: TCP not open (blocked or filtered).");
+                    }
+
+                    if (tcpOpen.Count == 0)
+                    {
+                        progress?.Report("No MASQUE IP accepted TCP :443 from this network.");
+                        WarpSessionLog.Step("connect", "masque tcp all closed");
+                        return (false,
+                            "No Cloudflare MASQUE IP accepted TCP :443. Official warp-cli cannot open a path while those IPs are filtered. Paste a working IP:443 if you have one.",
+                            null, "MASQUE");
+                    }
+
+                    string tls = await ProbeTlsAsync(tcpOpen[0], ct).ConfigureAwait(false);
+                    progress?.Report("TLS probe " + tcpOpen[0] + ": " + tls);
+                    WarpSessionLog.Step("probe", tls, new Dictionary<string, object?> { ["endpoint"] = tcpOpen[0] });
+
+                    progress?.Report($"{tcpOpen.Count} MASQUE :443 IP(s) accept TCP — IPv4-only handshake, no DPI…");
+                    var pinned = await TryMasqueTcpEndpointsAsync(
+                        tcpOpen, masqueOpt, censorship, progress, ct, skipTcpProbe: true).ConfigureAwait(false);
+                    if (pinned != null) return pinned.Value;
+
+                    if (censorship.DpiAssist)
+                    {
+                        MasqueDpiProfile[] ladder = WarpDpiAssist.GetMasqueLadder();
+                        progress?.Report("Handshake still failing — DPI without TLS split: " +
+                                         string.Join(" → ", ladder.Select(WarpDpiAssist.ProfileLabel)));
+                        foreach (MasqueDpiProfile profile in ladder)
+                        {
+                            ct.ThrowIfCancellationRequested();
+                            var (dok, dmsg) = await WarpDpiAssist.StartProfileAsync(profile, progress).ConfigureAwait(false);
+                            progress?.Report(dmsg);
+                            if (!dok) continue;
+                            var dpiPinned = await TryMasqueTcpEndpointsAsync(
+                                tcpOpen, masqueOpt, censorship, progress, ct, skipTcpProbe: true).ConfigureAwait(false);
+                            if (dpiPinned != null) return dpiPinned.Value;
+                        }
+                        await WarpDpiAssist.StopAsync().ConfigureAwait(false);
+                    }
+
+                    progress?.Report("MASQUE TCP :443 did not complete. Not falling back to WireGuard :2408 (blocked here).");
+                    if (censorship.DpiAssist) await WarpDpiAssist.StopAsync().ConfigureAwait(false);
+                    WarpSessionLog.Step("connect", "masque :443 exhausted");
+                    return (false,
+                        "TCP :443 reached Cloudflare but the WARP MASQUE handshake did not finish. Paste another IP:443 if you have one, or retry.",
+                        null, "MASQUE");
+                }
+                finally
+                {
+                    try { Run("debug", "connectivity-check", "enable"); } catch { /* ignore */ }
+                    if (ipv4 != null)
+                    {
+                        progress?.Report("Restoring IPv6 on NICs…");
+                        await ipv4.DisposeAsync().ConfigureAwait(false);
+                    }
+                }
+            }
+            else
+            {
+                progress?.Report($"First try: Cloudflare default endpoint ({defProto})…");
+                await WaitUntilDisconnectedAsync(ct).ConfigureAwait(false);
+                ApplyTunnelPrefs(defProto, null, progress);
+                ResetEndpoint();
+                await Task.Delay(500, ct).ConfigureAwait(false);
+                if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: true).ConfigureAwait(false) &&
+                    await StabilizeConnectedAsync(progress, ct, soft: censorship.Enabled).ConfigureAwait(false))
+                {
+                    var accepted = await QualifyOrRejectAsync(
+                        null, defProto, censorship, progress, ct, WarpSessionLog.ElapsedMs, fromCache: false).ConfigureAwait(false);
+                    if (accepted != null) return accepted.Value;
+                }
+            }
+
+            // Consumer warp-cli 2026: default HE is :2408 unless MASQUE actually loaded.
+            if (defProto.Equals("MASQUE", StringComparison.OrdinalIgnoreCase) &&
+                !LastHandshakeUsedWireGuardPort)
+            {
+                progress?.Report("Default h2 path failed — retry default with h3-with-h2-fallback…");
+                await WaitUntilDisconnectedAsync(ct).ConfigureAwait(false);
+                ApplyTunnelPrefs("MASQUE", "h3-with-h2-fallback", progress);
+                ResetEndpoint();
+                if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: true).ConfigureAwait(false) &&
+                    await StabilizeConnectedAsync(progress, ct, soft: true).ConfigureAwait(false) &&
+                    !LastHandshakeUsedWireGuardPort)
+                {
+                    var accepted = await QualifyOrRejectAsync(
+                        null, "MASQUE", censorship, progress, ct, WarpSessionLog.ElapsedMs, fromCache: false).ConfigureAwait(false);
+                    if (accepted != null) return accepted.Value;
+                }
+            }
+
+            if (!defProto.Equals("WireGuard", StringComparison.OrdinalIgnoreCase) &&
+                !LastHandshakeUsedWireGuardPort)
+            {
+                progress?.Report("Default MASQUE failed — retry Cloudflare default as WireGuard…");
+                await WaitUntilDisconnectedAsync(ct).ConfigureAwait(false);
+                ApplyTunnelPrefs("WireGuard", null, progress);
+                ResetEndpoint();
+                if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: true).ConfigureAwait(false) &&
+                    await StabilizeConnectedAsync(progress, ct, soft: true).ConfigureAwait(false))
+                {
+                    var accepted = await QualifyOrRejectAsync(
+                        null, "WireGuard", censorship, progress, ct, WarpSessionLog.ElapsedMs, fromCache: false).ConfigureAwait(false);
+                    if (accepted != null) return accepted.Value;
+                }
+            }
+
+            progress?.Report("Default endpoint variants failed.");
+            await WaitUntilDisconnectedAsync(ct).ConfigureAwait(false);
+            ResetEndpoint();
+        }
 
         List<string> list = endpoints?.Where(e => !string.IsNullOrWhiteSpace(e)).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
                             ?? new List<string>();
 
-        // Smart reconnect: last 24h successes for THIS protocol — try before full scan.
-        List<string> remembered = WarpSuccessCache.GetRecentEndpoints(protocol: preferredProtocol);
-        if (remembered.Count > 0 && (censorship.Enabled || list.Count == 0))
+        // Known-good seed only when the user pasted a list — do not auto-force CF IPs
+        // (warp-cli 2026 consumer goes Unable on tunnel endpoint set).
+        if (censorship.Enabled && list.Count > 0 && endpoints != null)
         {
-            progress?.Report($"Fast path: {remembered.Count} remembered {preferredProtocol} endpoint(s) from last 24h…");
-            WarpSessionLog.Step("cache", $"fast-path {remembered.Count}",
-                new Dictionary<string, object?>
-                {
-                    ["endpoints"] = string.Join(", ", remembered),
-                    ["protocol"] = preferredProtocol,
-                });
-
-            string fastProto = preferredProtocol;
-            SetProtocol(fastProto);
-            if (fastProto.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
-                SetMasqueOptions(censorship.Enabled ? "h2-only" : "h3-with-h2-fallback");
-            RememberCandidatePool(remembered);
-
-            int fi = 0;
-            foreach (string endpoint in remembered)
-            {
-                ct.ThrowIfCancellationRequested();
-                fi++;
-                progress?.Report($"[cache {fi}/{remembered.Count}] {endpoint}…");
-                WarpSessionLog.BeginAttempt(endpoint, fastProto, fi, remembered.Count);
-                long t0 = WarpSessionLog.ElapsedMs;
-                Disconnect();
-                Result setEp = SetEndpoint(endpoint);
-                if (!setEp.Ok)
-                {
-                    WarpSessionLog.AttemptResult(endpoint, fastProto, "cache-set-endpoint-failed",
-                        WarpSessionLog.ElapsedMs - t0, new Dictionary<string, object?> { ["err"] = setEp.ErrorLine });
-                    continue;
-                }
-                // Remembered endpoints need a long poll — short timeout was abandoning slow DPI handshakes.
-                if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: true).ConfigureAwait(false))
-                {
-                    PublicIpInfo info = await FetchPublicIpInfoAsync(8000).ConfigureAwait(false);
-                    WarpSessionLog.Egress(info.Source ?? "trace", info,
-                        new Dictionary<string, object?> { ["endpoint"] = endpoint, ["fromCache"] = true });
-                    if (info.WarpOn == true &&
-                        await StabilizeConnectedAsync(progress, ct).ConfigureAwait(false))
-                    {
-                        var accepted = await QualifyOrRejectAsync(
-                            endpoint, fastProto, censorship, progress, ct, t0, fromCache: true).ConfigureAwait(false);
-                        if (accepted != null) return accepted.Value;
-                    }
-                }
-                WarpSuccessCache.Demote(endpoint);
-                WarpSessionLog.AttemptResult(endpoint, fastProto, "cache-miss",
-                    WarpSessionLog.ElapsedMs - t0, new Dictionary<string, object?> { ["status"] = ParseStatus(Status()) });
-            }
-            progress?.Report("Remembered endpoints failed — falling back to full scan…");
-            WarpSessionLog.Decision("reject", "all remembered endpoints failed; full scan");
+            // user-specified endpoints only
         }
+        else if (censorship.Enabled && (endpoints == null || list.Count == 0))
+        {
+            list.Clear();
+            WarpSessionLog.Step("scan", "skipped forced-IP scan (warp-cli 2026 Unable on endpoint set)");
+            progress?.Report("Skipping IP scan — using Cloudflare default only.");
+        }
+
+        List<string> remembered = WarpSuccessCache.GetRecentEndpoints(protocol: preferredProtocol);
+        // Do not replay cached IPs via `tunnel endpoint set` — warp-cli 2026 consumer returns Unable.
+        if (remembered.Count > 0)
+            progress?.Report($"Remembered {remembered.Count} endpoint(s) — not forcing them (warp-cli 2026).");
 
         if (censorship.Enabled && list.Count == 0)
         {
-            list = await BuildCensorshipCandidatesAsync(preferredProtocol, censorship, progress, ct).ConfigureAwait(false);
-            // Still put remembered at front of the larger list for the scan loop.
-            if (remembered.Count > 0)
-                list = remembered.Concat(list).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            WarpSessionLog.Step("scan", $"candidates built: {list.Count}");
-        }
-        else if (remembered.Count > 0)
-        {
-            list = remembered.Concat(list).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            WarpSessionLog.Step("scan", "no forced-IP scan");
         }
 
-        // Honor preferred protocol. Under censorship, MASQUE is recommended but WireGuard is tried when selected.
+        // Only scan/force IPs when the user pasted a specific endpoint list.
+        if (censorship.Enabled && list.Count > 0 && endpoints != null)
+        {
+            WarpSessionLog.Step("scan", $"user endpoints: {list.Count}");
+        }
+
+        // Single proven strategy (3.5.8–3.5.10): Light DPI + one protocol + full endpoint list.
         string[] protocols = preferredProtocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase)
             ? new[] { "WireGuard" }
             : censorship.Enabled
@@ -650,15 +1061,13 @@ public static class WarpCli
         foreach (string protocol in protocols)
         {
             ct.ThrowIfCancellationRequested();
-            SetProtocol(protocol);
-            if (protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
-                SetMasqueOptions(censorship.Enabled ? "h2-only" : "h3-with-h2-fallback");
+            string masqueOpt = censorship.Enabled ? "h2-only" : "h3-with-h2-fallback";
+            ApplyTunnelPrefs(protocol, protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase) ? masqueOpt : null, progress);
 
             List<string> tryList = list;
             if (censorship.Enabled && list.Count > 0 &&
                 protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
             {
-                // Prefer HTTPS-looking MASQUE ports first (H2 TCP fallback + TLS fragment).
                 List<string> masquePorts = list
                     .Where(e => e.EndsWith(":443") || e.EndsWith(":8443") || e.EndsWith(":4443") || e.EndsWith(":8095"))
                     .ToList();
@@ -666,7 +1075,7 @@ public static class WarpCli
                     ? masquePorts.Concat(list.Except(masquePorts, StringComparer.OrdinalIgnoreCase)).ToList()
                     : list;
             }
-            if (remembered.Count > 0)
+            if (remembered.Count > 0 && endpoints != null && list.Count > 0)
             {
                 tryList = remembered
                     .Concat(tryList)
@@ -677,94 +1086,110 @@ public static class WarpCli
             if (tryList.Count == 0)
             {
                 progress?.Report($"Connecting with Cloudflare default endpoint ({protocol})…");
-                WarpSessionLog.Step("attempt", $"default endpoint ({protocol})");
                 ResetEndpoint();
-                if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: censorship.Enabled).ConfigureAwait(false))
+                if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: true).ConfigureAwait(false) &&
+                    await StabilizeConnectedAsync(progress, ct, soft: censorship.Enabled).ConfigureAwait(false))
                 {
                     var accepted = await QualifyOrRejectAsync(
                         null, protocol, censorship, progress, ct, WarpSessionLog.ElapsedMs, fromCache: false).ConfigureAwait(false);
-                    if (accepted != null)
-                        return accepted.Value;
-                    progress?.Report("Default endpoint failed quality — continuing…");
+                    if (accepted != null) return accepted.Value;
                 }
-                string failSt = ParseStatus(Status());
-                progress?.Report("Default endpoint failed: " + failSt);
-                WarpSessionLog.Step("attempt", "default failed",
-                    new Dictionary<string, object?> { ["status"] = failSt });
                 continue;
             }
 
-            progress?.Report($"Probing {tryList.Count} endpoints ({protocol}) in parallel…");
+            int takeN = censorship.Enabled ? Math.Max(censorship.MaxConnectAttempts, 14) : 12;
+            progress?.Report($"Probing {tryList.Count} endpoints ({protocol})…");
             List<string> reachable = await FilterReachableEndpointsAsync(
                 tryList, protocol, progress, ct, censorship.ProbeTimeoutMs,
-                take: censorship.Enabled ? censorship.MaxConnectAttempts : 12).ConfigureAwait(false);
+                take: takeN).ConfigureAwait(false);
 
             if (reachable.Count == 0)
             {
-                progress?.Report("Probe found nothing — trying IRCF/seed top entries anyway…");
-                reachable = tryList.Take(censorship.Enabled ? 6 : 8).ToList();
+                progress?.Report("Probe empty — trying seed/IRCF top entries anyway…");
+                reachable = tryList.Take(takeN).ToList();
             }
             else
+                progress?.Report($"{reachable.Count} reachable — connecting (fastest first)…");
+
+            if (remembered.Count > 0 && endpoints != null && list.Count > 0)
             {
-                progress?.Report($"{reachable.Count} endpoints look reachable (fastest first) — connecting…");
+                foreach (string rem in remembered.AsEnumerable().Reverse())
+                {
+                    if (!reachable.Contains(rem, StringComparer.OrdinalIgnoreCase))
+                        reachable.Insert(0, rem);
+                    else
+                    {
+                        reachable.RemoveAll(e => string.Equals(e, rem, StringComparison.OrdinalIgnoreCase));
+                        reachable.Insert(0, rem);
+                    }
+                }
+                reachable = reachable.Distinct(StringComparer.OrdinalIgnoreCase)
+                    .Take(takeN)
+                    .ToList();
             }
 
-        // When we have remembered endpoints, try them first without waiting for the full probe sort
-        // to bury them — FilterReachableEndpointsAsync still ranks by RTT, so inject remembered
-        // at the front of the connect queue after probing.
-        if (remembered.Count > 0)
-        {
-            reachable = remembered
-                .Where(e => reachable.Contains(e, StringComparer.OrdinalIgnoreCase) || tryList.Contains(e, StringComparer.OrdinalIgnoreCase))
-                .Concat(reachable)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .Take(censorship.Enabled ? censorship.MaxConnectAttempts : 12)
+            // Prefer historically working hosts at the front
+            string[] preferHosts = { "162.159.198.49", "162.159.199.85", "162.159.192.1", "188.114.98.224" };
+            reachable = reachable
+                .OrderBy(e => preferHosts.Any(h => e.StartsWith(h, StringComparison.OrdinalIgnoreCase)) ? 0 : 1)
+                .ThenBy(e => reachable.IndexOf(e))
                 .ToList();
-            // Also try remembered even if TCP probe missed (WARP may still connect).
-            foreach (string rem in remembered)
-            {
-                if (!reachable.Contains(rem, StringComparer.OrdinalIgnoreCase))
-                    reachable.Insert(0, rem);
-            }
-            reachable = reachable.Distinct(StringComparer.OrdinalIgnoreCase)
-                .Take(censorship.Enabled ? Math.Max(censorship.MaxConnectAttempts, remembered.Count + 4) : 12)
-                .ToList();
-            progress?.Report($"Connect order: remembered first ({string.Join(", ", remembered.Take(3))}{(remembered.Count > 3 ? "…" : "")}).");
-        }
 
+            RememberCandidatePool(reachable.Concat(tryList));
             WarpSessionLog.Step("probe", $"reachable={reachable.Count}",
                 new Dictionary<string, object?>
                 {
                     ["protocol"] = protocol,
                     ["endpoints"] = string.Join(", ", reachable.Take(12)),
-                    ["remembered"] = string.Join(", ", remembered.Take(8)),
                 });
-            RememberCandidatePool(reachable.Concat(remembered).Concat(tryList));
+
+            // Escalate DPI mid-scan when handshakes stick on Connecting (common under IR DPI).
+            MasqueDpiProfile[] dpiLadder = censorship.DpiAssist
+                ? WarpDpiAssist.GetMasqueLadder()
+                : Array.Empty<MasqueDpiProfile>();
+            int dpiIdx = 0;
+            int stuckStreak = 0;
+            decimal[] fragLadder = { 2, 2, 3, 1 };
+            string[] masqueLadder = censorship.Enabled
+                ? new[] { "h2-only", "h2-only", "h3-with-h2-fallback", "h2-only" }
+                : new[] { masqueOpt };
 
             int n = 0;
             foreach (string endpoint in reachable)
             {
                 ct.ThrowIfCancellationRequested();
                 n++;
-                progress?.Report($"[{n}/{reachable.Count}] Connecting {endpoint} ({protocol})…");
+
+                if (censorship.DpiAssist && stuckStreak >= 2 && dpiIdx + 1 < dpiLadder.Length)
+                {
+                    dpiIdx++;
+                    stuckStreak = 0;
+                    masqueOpt = masqueLadder[Math.Min(dpiIdx, masqueLadder.Length - 1)];
+                    decimal frag = fragLadder[Math.Min(dpiIdx, fragLadder.Length - 1)];
+                    progress?.Report($"Handshake stalled — escalating DPI to {WarpDpiAssist.ProfileLabel(dpiLadder[dpiIdx])} + {masqueOpt}…");
+                    var (dok, dmsg) = await WarpDpiAssist.StartProfileAsync(dpiLadder[dpiIdx], progress, frag).ConfigureAwait(false);
+                    progress?.Report(dmsg);
+                    WarpSessionLog.Step("dpi", "escalate " + dpiLadder[dpiIdx],
+                        new Dictionary<string, object?> { ["ok"] = dok, ["masque"] = masqueOpt, ["fragment"] = frag });
+                }
+
+                progress?.Report($"[{n}/{reachable.Count}] Connecting {endpoint} ({protocol}/{masqueOpt})…");
                 WarpSessionLog.BeginAttempt(endpoint, protocol, n, reachable.Count);
                 long t0 = WarpSessionLog.ElapsedMs;
                 Disconnect();
+                await WaitUntilDisconnectedAsync(ct, 5000).ConfigureAwait(false);
+                ApplyTunnelPrefs(protocol, protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase) ? masqueOpt : null, progress);
                 Result setEp = SetEndpoint(endpoint);
                 WarpSessionLog.Cli("tunnel endpoint set " + endpoint, setEp, always: true);
                 if (!setEp.Ok)
                 {
                     progress?.Report($"Skip {endpoint}: {setEp.ErrorLine}");
-                    WarpSessionLog.AttemptResult(endpoint, protocol, "set-endpoint-failed",
-                        WarpSessionLog.ElapsedMs - t0,
-                        new Dictionary<string, object?> { ["err"] = setEp.ErrorLine });
-                    WarpSessionLog.Decision("reject", "set-endpoint failed",
-                        new Dictionary<string, object?> { ["endpoint"] = endpoint, ["err"] = setEp.ErrorLine });
                     continue;
                 }
 
-                if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: censorship.Enabled).ConfigureAwait(false))
+                if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: true).ConfigureAwait(false))
                 {
+                    stuckStreak = 0;
                     PublicIpInfo info = await FetchPublicIpInfoAsync(8000).ConfigureAwait(false);
                     WarpSessionLog.Egress(info.Source ?? "trace", info,
                         new Dictionary<string, object?>
@@ -774,58 +1199,109 @@ public static class WarpCli
                             ["status"] = ParseStatus(Status()),
                         });
                     if (info.WarpOn == true &&
-                        await StabilizeConnectedAsync(progress, ct).ConfigureAwait(false))
+                        await StabilizeConnectedAsync(progress, ct, soft: censorship.Enabled).ConfigureAwait(false))
                     {
                         var accepted = await QualifyOrRejectAsync(
                             endpoint, protocol, censorship, progress, ct, t0, fromCache: false).ConfigureAwait(false);
                         if (accepted != null) return accepted.Value;
-                        // Quality failed — try next address
                         continue;
                     }
-                    if (info.WarpOn == true)
-                    {
-                        progress?.Report("Connected but tunnel unstable during settle — trying next…");
-                        WarpSessionLog.AttemptResult(endpoint, protocol, "reject-unstable",
-                            WarpSessionLog.ElapsedMs - t0,
-                            new Dictionary<string, object?> { ["ip"] = info.Ip, ["status"] = ParseStatus(Status()) });
-                        WarpSessionLog.Decision("reject", "warp=on but failed settle",
-                            new Dictionary<string, object?> { ["endpoint"] = endpoint });
-                        WarpSuccessCache.Demote(endpoint);
-                        continue;
-                    }
-                    progress?.Report("Status connected but warp≠on — trying next…");
-                    WarpSessionLog.AttemptResult(endpoint, protocol, "reject-warp-not-on",
-                        WarpSessionLog.ElapsedMs - t0,
-                        new Dictionary<string, object?>
-                        {
-                            ["warpOn"] = info.WarpOn,
-                            ["ip"] = info.Ip,
-                            ["error"] = info.Error,
-                            ["status"] = ParseStatus(Status()),
-                        });
-                    WarpSessionLog.Decision("reject", "status Connected but egress warp≠on",
-                        new Dictionary<string, object?>
-                        {
-                            ["endpoint"] = endpoint,
-                            ["warpOn"] = info.WarpOn,
-                            ["ip"] = info.Ip,
-                            ["error"] = info.Error,
-                        });
+                    progress?.Report(info.WarpOn == true
+                        ? "Unstable after settle — next…"
+                        : "Connected status but warp≠on — next…");
                 }
                 else
                 {
-                    Result stFull = Status();
-                    string st = ParseStatus(stFull);
-                    progress?.Report($"No connect on {endpoint}: {st}");
+                    stuckStreak++;
+                    progress?.Report($"No connect on {endpoint}: {ParseStatus(Status())}");
                     WarpSessionLog.AttemptResult(endpoint, protocol, "reject-not-connected",
                         WarpSessionLog.ElapsedMs - t0,
                         new Dictionary<string, object?>
                         {
-                            ["status"] = st,
-                            ["statusRaw"] = TruncateForLog(stFull.Combined, 400),
+                            ["status"] = ParseStatus(Status()),
+                            ["stuckStreak"] = stuckStreak,
+                            ["dpi"] = dpiIdx < dpiLadder.Length ? dpiLadder[dpiIdx].ToString() : "none",
                         });
-                    WarpSessionLog.Decision("reject", "never reached Connected+warp=on",
-                        new Dictionary<string, object?> { ["endpoint"] = endpoint, ["status"] = st });
+                }
+            }
+
+            // Last MASQUE pass: warp+doh only when the user pasted endpoints (forced IPs break warp-cli 2026).
+            if (censorship.Enabled &&
+                endpoints != null && list.Count > 0 &&
+                protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
+            {
+                progress?.Report("Trying mode warp+doh with remaining seeds…");
+                Result md = SetModeWarpDoh();
+                WarpSessionLog.Cli("mode warp+doh", md, always: true);
+                ApplyTunnelPrefs("MASQUE", "h2-only", progress);
+                if (censorship.DpiAssist)
+                {
+                    var (dok, dmsg) = await WarpDpiAssist.StartAsync(DPIBasic.DPIBasicBypassMode.Medium, progress).ConfigureAwait(false);
+                    progress?.Report(dmsg);
+                }
+                List<string> lastTry = reachable.Take(6).ToList();
+                if (lastTry.Count == 0)
+                    lastTry = new List<string> { "162.159.198.49:443", "162.159.199.85:443" };
+                int li = 0;
+                foreach (string endpoint in lastTry)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    li++;
+                    progress?.Report($"[warp+doh {li}/{lastTry.Count}] {endpoint}…");
+                    Disconnect();
+                    await Task.Delay(300, ct).ConfigureAwait(false);
+                    if (!SetEndpoint(endpoint).Ok) continue;
+                    long t0 = WarpSessionLog.ElapsedMs;
+                    if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: true).ConfigureAwait(false))
+                    {
+                        PublicIpInfo info = await FetchPublicIpInfoAsync(8000).ConfigureAwait(false);
+                        if (info.WarpOn == true &&
+                            await StabilizeConnectedAsync(progress, ct, soft: true).ConfigureAwait(false))
+                        {
+                            var accepted = await QualifyOrRejectAsync(
+                                endpoint, protocol, censorship, progress, ct, t0, fromCache: false).ConfigureAwait(false);
+                            if (accepted != null) return accepted.Value;
+                        }
+                    }
+                }
+                SetModeWarp(); // restore default mode for any further attempts
+            }
+        }
+
+        // Optional final Medium/Mode5 seed pass only with a user-provided list.
+        if (censorship.Enabled && censorship.DpiAssist && endpoints != null && list.Count > 0)
+        {
+            progress?.Report("Final Mode5 DPI seed pass…");
+            var (mok, mmsg) = await WarpDpiAssist.StartAsync(DPIBasic.DPIBasicBypassMode.Mode5, progress).ConfigureAwait(false);
+            progress?.Report(mmsg);
+            if (mok)
+            {
+                string medProto = preferredProtocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase)
+                    ? "WireGuard"
+                    : "MASQUE";
+                ApplyTunnelPrefs(medProto, medProto.Equals("MASQUE", StringComparison.OrdinalIgnoreCase) ? "h2-only" : null, progress);
+                List<string> retry = (remembered.Count > 0 ? remembered : list).Take(8).ToList();
+                if (retry.Count == 0) retry = new List<string> { "162.159.198.49:443", "162.159.199.85:443" };
+                int n = 0;
+                foreach (string endpoint in retry)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    n++;
+                    progress?.Report($"[Mode5 {n}/{retry.Count}] {endpoint}…");
+                    Disconnect();
+                    if (!SetEndpoint(endpoint).Ok) continue;
+                    long t0 = WarpSessionLog.ElapsedMs;
+                    if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: true).ConfigureAwait(false))
+                    {
+                        PublicIpInfo info = await FetchPublicIpInfoAsync(8000).ConfigureAwait(false);
+                        if (info.WarpOn == true &&
+                            await StabilizeConnectedAsync(progress, ct, soft: true).ConfigureAwait(false))
+                        {
+                            var accepted = await QualifyOrRejectAsync(
+                                endpoint, medProto, censorship, progress, ct, t0, fromCache: false).ConfigureAwait(false);
+                            if (accepted != null) return accepted.Value;
+                        }
+                    }
                 }
             }
         }
@@ -837,14 +1313,74 @@ public static class WarpCli
             WarpSessionLog.Step("attempt", "last resort default " + preferredProtocol);
             Disconnect();
             ResetEndpoint();
-            SetProtocol(preferredProtocol);
-            if (preferredProtocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
-                SetMasqueOptions(censorship.Enabled ? "h2-only" : "h3-with-h2-fallback");
+            ApplyTunnelPrefs(preferredProtocol,
+                preferredProtocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase)
+                    ? (censorship.Enabled ? "h2-only" : "h3-with-h2-fallback")
+                    : null,
+                progress);
             if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: true).ConfigureAwait(false) &&
-                await StabilizeConnectedAsync(progress, ct).ConfigureAwait(false))
+                await StabilizeConnectedAsync(progress, ct, soft: censorship.Enabled).ConfigureAwait(false))
             {
                 var accepted = await QualifyOrRejectAsync(
                     null, preferredProtocol, censorship, progress, ct, WarpSessionLog.ElapsedMs, fromCache: false).ConfigureAwait(false);
+                if (accepted != null) return accepted.Value;
+            }
+        }
+
+        // Auto WireGuard fallback when MASQUE exhausted under IR (UDP sometimes works when H2 is inspected).
+        if (censorship.Enabled &&
+            !preferredProtocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase))
+        {
+            progress?.Report("MASQUE exhausted — trying WireGuard (UDP) fallback…");
+            if (censorship.DpiAssist)
+            {
+                var (dok, dmsg) = await WarpDpiAssist.StartAsync(DPIBasic.DPIBasicBypassMode.Light, progress, 2).ConfigureAwait(false);
+                progress?.Report(dmsg);
+            }
+            SetModeWarp();
+            ApplyTunnelPrefs("WireGuard", null, progress);
+            if (endpoints != null && list.Count > 0)
+            {
+                List<string> wgTry = new();
+                foreach (string ep in list.Take(20))
+                {
+                    int colon = ep.LastIndexOf(':');
+                    string host = colon > 0 ? ep[..colon] : ep;
+                    string wg = host + ":2408";
+                    if (!wgTry.Contains(wg, StringComparer.OrdinalIgnoreCase))
+                        wgTry.Add(wg);
+                }
+                List<string> wgReach = await FilterReachableEndpointsAsync(
+                    wgTry, "WireGuard", progress, ct, Math.Max(600, censorship.ProbeTimeoutMs), take: 10).ConfigureAwait(false);
+                if (wgReach.Count == 0) wgReach = wgTry.Take(8).ToList();
+                int wi = 0;
+                foreach (string endpoint in wgReach)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    wi++;
+                    progress?.Report($"[WG {wi}/{wgReach.Count}] {endpoint}…");
+                    await WaitUntilDisconnectedAsync(ct, 5000).ConfigureAwait(false);
+                    ApplyTunnelPrefs("WireGuard", null, progress);
+                    if (!SetEndpoint(endpoint).Ok) continue;
+                    long t0 = WarpSessionLog.ElapsedMs;
+                    if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: true).ConfigureAwait(false) &&
+                        await StabilizeConnectedAsync(progress, ct, soft: true).ConfigureAwait(false))
+                    {
+                        var accepted = await QualifyOrRejectAsync(
+                            endpoint, "WireGuard", censorship, progress, ct, t0, fromCache: false).ConfigureAwait(false);
+                        if (accepted != null) return accepted.Value;
+                    }
+                }
+            }
+            // Default WG endpoint (no forced IPs — warp-cli 2026 consumer goes Unable)
+            await WaitUntilDisconnectedAsync(ct).ConfigureAwait(false);
+            ResetEndpoint();
+            ApplyTunnelPrefs("WireGuard", null, progress);
+            if (await PollConnectedAsync(progress, verifyWarpOn: true, ct, longPoll: true).ConfigureAwait(false) &&
+                await StabilizeConnectedAsync(progress, ct, soft: true).ConfigureAwait(false))
+            {
+                var accepted = await QualifyOrRejectAsync(
+                    null, "WireGuard", censorship, progress, ct, WarpSessionLog.ElapsedMs, fromCache: false).ConfigureAwait(false);
                 if (accepted != null) return accepted.Value;
             }
         }
@@ -853,11 +1389,9 @@ public static class WarpCli
 
         WarpSessionLog.Step("connect", "all attempts exhausted");
         string tip = preferredProtocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase)
-            ? "WireGuard (UDP) failed. Tip: switch Protocol to MASQUE — TCP/H2 usually works better under Iranian DPI."
-            : "Could not connect under censorship. Tips: keep \"DPI assist\" on, try again (new CF IPs), " +
-              "or paste a working IP:443 from Clean IP Scanner / IRCF. " +
-              "If WARP IPs themselves are fully blocked, official warp-cli cannot fake MASQUE SNI — " +
-              "tools like usque/masque-plus with custom SNI may be required as a last resort.";
+            ? "WireGuard (UDP) failed. Tip: switch Protocol to MASQUE and retry."
+            : "Could not connect (MASQUE + WireGuard tried). Keep Iran mode + DPI assist on, run as Admin, retry. " +
+              "If Cloudflare engage IPs are fully blocked, official warp-cli cannot open a path.";
         return (false, tip, null, preferredProtocol);
     }
 
@@ -875,28 +1409,17 @@ public static class WarpCli
     {
         if (opt.RequireLinkQuality)
         {
-            var q = await WarpLinkQuality.EvaluateAsync(progress, ct, strict: opt.Enabled).ConfigureAwait(false);
+            // Soft check only — full soak made connects feel "broken" under DPI.
+            var q = await WarpLinkQuality.EvaluateAsync(progress, ct, strict: false).ConfigureAwait(false);
             if (!q.Ok)
             {
-                progress?.Report($"Weak link on {endpoint ?? "default"} — {q.Reason}. Trying next address…");
+                progress?.Report($"Weak link on {endpoint ?? "default"} — {q.Reason}. Trying next…");
                 WarpSessionLog.Decision("reject", "quality gate failed",
                     new Dictionary<string, object?>
                     {
                         ["endpoint"] = endpoint,
-                        ["protocol"] = protocol,
                         ["reason"] = q.Reason,
-                        ["median"] = q.MedianRttMs,
-                        ["downloadMs"] = q.DownloadMs,
                         ["fromCache"] = fromCache,
-                    });
-                WarpSessionLog.AttemptResult(endpoint ?? "default", protocol, "reject-quality",
-                    WarpSessionLog.ElapsedMs - attemptStartMs,
-                    new Dictionary<string, object?>
-                    {
-                        ["reason"] = q.Reason,
-                        ["median"] = q.MedianRttMs,
-                        ["max"] = q.MaxRttMs,
-                        ["downloadOk"] = q.DownloadOk,
                     });
                 if (!string.IsNullOrWhiteSpace(endpoint))
                     WarpSuccessCache.Demote(endpoint);
@@ -1283,6 +1806,9 @@ public static class WarpCli
         int timeoutMs = 350,
         int take = 12)
     {
+        ct.ThrowIfCancellationRequested();
+        if (take <= 0) return new List<string>();
+
         bool masque = protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase);
         var scored = new ConcurrentBag<(string Ep, int Ms)>();
 
@@ -1293,13 +1819,17 @@ public static class WarpCli
             {
                 if (!TryParseHostPort(ep, out string host, out int port)) return;
 
+                string reachableEndpoint = ep;
                 int ms;
                 if (masque)
                 {
                     // Real TCP connect on the MASQUE port (patterniha: do not rely on ICMP).
                     ms = await MeasureTcpMsAsync(host, port, timeoutMs, token).ConfigureAwait(false);
                     if (ms < 0 && port == 443)
+                    {
                         ms = await MeasureTcpMsAsync(host, 8443, timeoutMs, token).ConfigureAwait(false);
+                        if (ms >= 0) reachableEndpoint = ep[..ep.LastIndexOf(':')] + ":8443";
+                    }
                 }
                 else
                 {
@@ -1313,14 +1843,14 @@ public static class WarpCli
                 }
 
                 if (ms >= 0)
-                    scored.Add((ep, ms));
+                    scored.Add((reachableEndpoint, ms));
             }).ConfigureAwait(false);
 
         List<string> ordered = scored
             .OrderBy(x => x.Ms)
             .Select(x => x.Ep)
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Take(Math.Max(4, take))
+            .Take(take)
             .ToList();
 
         progress?.Report(ordered.Count > 0
@@ -1383,12 +1913,16 @@ public static class WarpCli
     /// <summary>
     /// After first warp=on, re-check a few times so we don't accept a flapping MASQUE session.
     /// </summary>
-    private static async Task<bool> StabilizeConnectedAsync(IProgress<string>? progress, CancellationToken ct)
+    private static async Task<bool> StabilizeConnectedAsync(
+        IProgress<string>? progress, CancellationToken ct, bool soft = false)
     {
-        progress?.Report("Settling tunnel (confirm warp=on stays on)…");
-        for (int i = 0; i < 3; i++)
+        int rounds = soft ? 1 : 3;
+        progress?.Report(soft
+            ? "Quick settle (confirm warp=on)…"
+            : "Settling tunnel (confirm warp=on stays on)…");
+        for (int i = 0; i < rounds; i++)
         {
-            await Task.Delay(1200, ct).ConfigureAwait(false);
+            await Task.Delay(soft ? 800 : 1200, ct).ConfigureAwait(false);
             Result st = Status();
             string parsed = ParseStatus(st);
             if (!IsConnected(st))
@@ -1400,7 +1934,7 @@ public static class WarpCli
 
             PublicIpInfo info = await FetchPublicIpInfoAsync(6000).ConfigureAwait(false);
             WarpSessionLog.Egress(info.Source ?? "trace", info,
-                new Dictionary<string, object?> { ["phase"] = "stabilize", ["i"] = i, ["status"] = parsed });
+                new Dictionary<string, object?> { ["phase"] = "stabilize", ["i"] = i, ["status"] = parsed, ["soft"] = soft });
             if (info.WarpOn != true)
             {
                 WarpSessionLog.Step("stabilize", "warp≠on during settle",
@@ -1409,12 +1943,12 @@ public static class WarpCli
             }
         }
 
-        WarpSessionLog.Step("stabilize", "ok");
+        WarpSessionLog.Step("stabilize", soft ? "ok-soft" : "ok");
         return true;
     }
 
     private static async Task<bool> PollConnectedAsync(
-        IProgress<string>? progress, bool verifyWarpOn, CancellationToken ct, bool longPoll = false)
+        IProgress<string>? progress, bool verifyWarpOn, CancellationToken ct, bool longPoll = false, bool masquePin = false)
     {
         Result connect = Connect();
         WarpSessionLog.Cli("connect", connect, always: true);
@@ -1425,16 +1959,39 @@ public static class WarpCli
                 ["out"] = TruncateForLog(connect.Combined, 300),
                 ["verifyWarpOn"] = verifyWarpOn,
                 ["longPoll"] = longPoll,
+                ["masquePin"] = masquePin,
             });
-        // Long poll ~17s: under Iranian DPI MASQUE handshakes often need >10s (h2-only path).
-        int loops = longPoll ? (verifyWarpOn ? 28 : 18) : (verifyWarpOn ? 12 : 8);
-        int delay = longPoll ? 600 : 400;
+        // Patience: IR handshakes often need 20–40s. MASQUE pin: fail faster (~11s) and rotate IPs.
+        int loops = masquePin ? 22 : (longPoll ? (verifyWarpOn ? 50 : 24) : (verifyWarpOn ? 18 : 10));
+        const int delay = 500;
+        int connectingStreak = 0;
+        int stuckLimit = masquePin ? 20 : (longPoll ? 48 : 22);
         for (int i = 0; i < loops; i++)
         {
             await Task.Delay(delay, ct).ConfigureAwait(false);
             Result st = Status();
             string parsed = ParseStatus(st);
-            WarpSessionLog.StatusChange(parsed, new Dictionary<string, object?> { ["i"] = i, ["raw"] = TruncateForLog(st.Combined, 240) });
+            string raw = st.Combined ?? "";
+            WarpSessionLog.StatusChange(parsed, new Dictionary<string, object?> { ["i"] = i, ["raw"] = TruncateForLog(raw, 240) });
+
+            if (i == 0)
+            {
+                string reason = ExtractStatusReason(raw);
+                if (!string.IsNullOrEmpty(reason))
+                    progress?.Report(reason);
+            }
+
+            if (_expectProtocol != null &&
+                _expectProtocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase) &&
+                LooksLikeWireGuardHandshake(raw) &&
+                i >= 1)
+            {
+                LastHandshakeUsedWireGuardPort = true;
+                progress?.Report("Handshake target is :2408 (WireGuard), not MASQUE :443 — protocol did not apply.");
+                WarpSessionLog.Decision("reject", "MASQUE requested but handshake is WireGuard :2408",
+                    new Dictionary<string, object?> { ["i"] = i, ["status"] = parsed, ["raw"] = TruncateForLog(raw, 240) });
+                return false;
+            }
 
             if (parsed.Contains("Failed", StringComparison.OrdinalIgnoreCase))
             {
@@ -1442,13 +1999,41 @@ public static class WarpCli
                     new Dictionary<string, object?> { ["i"] = i, ["status"] = parsed });
                 return false;
             }
-            if (i >= 3 && (parsed.Contains("Disconnected", StringComparison.OrdinalIgnoreCase) ||
+            // warp-cli 2026: forced endpoints often go Unable then Disconnected — abort fast.
+            if (parsed.Contains("Unable", StringComparison.OrdinalIgnoreCase) && i >= 2)
+            {
+                progress?.Report("WARP status Unable — next…");
+                WarpSessionLog.Decision("reject", "warp status Unable",
+                    new Dictionary<string, object?> { ["i"] = i, ["status"] = parsed });
+                // Do not endpoint-reset on MASQUE — that loads WireGuard :2408 for the next try.
+                if (_expectProtocol == null ||
+                    !_expectProtocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
+                {
+                    try { ResetEndpoint(); } catch { /* ignore */ }
+                }
+                return false;
+            }
+            if (i >= 5 && (parsed.Contains("Disconnected", StringComparison.OrdinalIgnoreCase) ||
                            parsed.Contains("Not connected", StringComparison.OrdinalIgnoreCase)))
             {
                 WarpSessionLog.Decision("reject", "disconnected during poll",
                     new Dictionary<string, object?> { ["i"] = i, ["status"] = parsed });
                 return false;
             }
+
+            bool connecting = parsed.Contains("Connecting", StringComparison.OrdinalIgnoreCase);
+            if (connecting)
+            {
+                connectingStreak++;
+                if (connectingStreak >= stuckLimit)
+                {
+                    progress?.Report("Handshake stuck on Connecting — next…");
+                    WarpSessionLog.Decision("reject", "stuck Connecting",
+                        new Dictionary<string, object?> { ["i"] = i, ["streak"] = connectingStreak });
+                    return false;
+                }
+            }
+            else connectingStreak = 0;
 
             if (!IsConnected(st)) continue;
 
@@ -1458,7 +2043,7 @@ public static class WarpCli
                 return true;
             }
 
-            PublicIpInfo info = await FetchPublicIpInfoAsync(5000).ConfigureAwait(false);
+            PublicIpInfo info = await FetchPublicIpInfoAsync(7000).ConfigureAwait(false);
             WarpSessionLog.Egress(info.Source ?? "trace", info, new Dictionary<string, object?> { ["i"] = i, ["status"] = parsed });
             if (info.WarpOn == true)
             {
@@ -1481,6 +2066,24 @@ public static class WarpCli
                 ["verifyWarpOn"] = verifyWarpOn,
             });
         return false;
+    }
+
+    private static async Task WaitUntilDisconnectedAsync(CancellationToken ct, int maxMs = 8000)
+    {
+        Disconnect();
+        int waited = 0;
+        while (waited < maxMs)
+        {
+            ct.ThrowIfCancellationRequested();
+            Result st = Status();
+            string p = ParseStatus(st);
+            if (!IsConnected(st) && !p.Contains("Connecting", StringComparison.OrdinalIgnoreCase))
+                return;
+            await Task.Delay(400, ct).ConfigureAwait(false);
+            waited += 400;
+            if (waited is 400 or 2000)
+                Disconnect();
+        }
     }
 
     public sealed class PublicIpInfo
@@ -1677,9 +2280,8 @@ public static class WarpCli
             Result st = Status();
             Result settings = Run("settings", "list");
             Result mode = Run("mode");
-            Result proto = Run("tunnel", "protocol");
-            Result ep = Run("tunnel", "endpoint");
             Result reg = Run("registration", "show");
+            string protoFromSettings = ReadEffectiveProtocol();
 
             // Registration: keep account type / device id only — never license keys.
             string regSafe = "";
@@ -1726,8 +2328,8 @@ public static class WarpCli
                 ["status"] = ParseStatus(st),
                 ["statusRaw"] = TruncateForLog(st.Combined, 300),
                 ["mode"] = TruncateForLog(mode.Combined, 120),
-                ["protocol"] = TruncateForLog(proto.Combined, 120),
-                ["endpoint"] = TruncateForLog(ep.Combined, 160),
+                ["protocol"] = string.IsNullOrEmpty(protoFromSettings) ? "(from settings: unknown)" : protoFromSettings,
+                ["endpoint"] = "(use settings list — `tunnel endpoint` without args is help text on 2026.6)",
                 ["registration"] = TruncateForLog(regSafe, 240),
                 ["settings"] = settingsSafe,
                 ["dpiActive"] = WarpDpiAssist.IsActive,

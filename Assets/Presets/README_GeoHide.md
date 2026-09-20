@@ -1,38 +1,17 @@
-# GeoHide without your own VPS
+# GeoHide = Cloudflare WARP only
 
-## What changes the IP remotes see?
+Game servers and websites should see a **Cloudflare exit IP**, not your ISP.
 
-| Approach | Changes public IP? | Notes |
-|---|---|---|
-| Encrypted DNS only (DoH/DoT/DNSCrypt) | No | Hides DNS from ISP |
-| Shecan / 403 Smart DNS | Only for domains they proxy | Web/dev anti-sanction |
-| Shelter / Radar (gaming Smart DNS) | Only for games they list | Confirm coverage first |
-| DNSveil Share + system HTTP proxy | Rarely for games/UDP | Browsers mainly |
-| Upstream `proxy:` rules + Proxifier | Yes (proxy exit) | Needs a foreign SOCKS/HTTP |
-| **Tools → GeoHide WARP** | **Yes (Cloudflare exit)** | No VPS; needs Cloudflare WARP |
+| Approach | Changes public IP? |
+|---|---|
+| Encrypted DNS only | No |
+| Smart DNS (Shecan / Shelter / etc.) | Only for domains they proxy — **removed from DNSveil GeoHide** |
+| **Tools → GeoHide WARP** | **Yes — Cloudflare exit** |
 
-DNS alone does not hide your IP. Remotes see the TCP/UDP source address.
-
-## Path A — Smart DNS presets
-
-1. **Anti-sanction (Shecan):** `Rules_ShecanShelter_AntiSanction.txt` — websites/devtools.
-2. **Gaming Smart DNS:** `Rules_GamingSmartDns_ShelterRadar.txt` — edit in your game domains after checking Shelter/Radar coverage.
-3. Import via **Tools → GeoHide WARP** (Rules preset dropdown + Import into Rules).
-
-## Path B — Cloudflare WARP (recommended, no VPS)
-
-**Tools → GeoHide WARP** drives official `warp-cli` (same idea as [PyWarp](https://github.com/saeedmasoudie/pywarp)):
+## How
 
 1. Install [Cloudflare WARP](https://one.one.one.one/).
-2. Connect (or Auto-find endpoint if the ISP blocks defaults).
-3. Confirm Public IP is Cloudflare, then use your apps.
+2. **Tools → GeoHide WARP** → Connect (**Iran mode** + **DPI assist** under Iranian DPI).
+3. Confirm Public IP / `warp=on` (Cloudflare), then play.
 
-See **`README_WARP.md`**.
-
-## Path C — Your own upstream proxy
-
-Import `Rules_ViaUpstreamProxy.txt`, set `GeoHideProxy=`, run Share proxy, force apps through local SOCKS if needed.
-
-## Bottom line
-
-Use **GeoHide WARP** when you need remotes to see a non-local IP and you have no VPS. Use Shecan/gaming Smart DNS only for domains those providers actually cover.
+Iran path uses **GoodbyeDPI Light** + MASQUE **h2-only** (proven). See **`README_WARP.md`**.

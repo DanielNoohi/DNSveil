@@ -46,13 +46,30 @@ public partial class FormMain
                 // Add colors and texts to About page
                 this.InvokeIt(() =>
                 {
-                    CustomLabelAboutThis.ForeColor = Color.DodgerBlue;
+                    CustomLabelAboutThis.ForeColor = Color.FromArgb(88, 166, 255);
+                    CustomLabelAboutThis.Font = new Font("Segoe UI Semibold", 22F, FontStyle.Bold);
                     string aboutVer = $"v{Info.GetAppInfo(Assembly.GetExecutingAssembly()).ProductVersion} ({ArchProcess.ToString().ToLower()})";
                     CustomLabelAboutVersion.Text = aboutVer;
-                    CustomLabelAboutThis2.ForeColor = Color.IndianRed;
+                    CustomLabelAboutThis2.ForeColor = Color.FromArgb(139, 148, 158);
+                    TabPageSecureDNS.Text = "DNS";
+                    CustomTabControlMain.ItemSize = new Size(108, 28);
+                    CustomTabControlMain.RoundedCorners = 8;
+                    CustomTabControlSecureDNS.ItemSize = new Size(128, 26);
+                    CustomTabControlSecureDNS.RoundedCorners = 8;
+                    foreach (Control c in Controllers.GetAllControls(this))
+                    {
+                        if (c is CustomButton b)
+                            b.RoundedCorners = Math.Max(b.RoundedCorners, 7);
+                    }
                 });
 
                 Controllers.SetDarkControl(this);
+                this.InvokeIt(() =>
+                {
+                    SplitContainerMain.BackColor = Color.FromArgb(56, 139, 253);
+                    if (LabelMain.Visible)
+                        LabelMain.ForeColor = Color.FromArgb(88, 166, 255);
+                });
 
                 // Wait
                 //Debug.WriteLine("All Controls: " + controls.Count);

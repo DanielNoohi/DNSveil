@@ -1,7 +1,9 @@
 using System.Diagnostics;
 using System.Net.Http;
 using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.ServiceProcess;
+using MsmhToolsClass;
 
 namespace SecureDNSClient.GeoHide;
 
@@ -152,6 +154,105 @@ public static class WarpPreflight
     }
 
     /// <summary>
+    /// Bounce CloudflareWARP so <c>tunnel protocol set MASQUE</c> actually applies
+    /// (2026.6 consumer can keep a WireGuard override until the service restarts).
+    /// </summary>
+    public static async Task<(bool Ok, string Message)> RestartWarpServiceAsync(
+        IProgress<string>? progress = null,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            progress?.Report("Restarting CloudflareWARP service…");
+            await Task.Run(() =>
+            {
+                using ServiceController sc = new("CloudflareWARP");
+                if (sc.Status == ServiceControllerStatus.Running ||
+                    sc.Status == ServiceControllerStatus.StartPending)
+                {
+                    sc.Stop();
+                    sc.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(20));
+                }
+                sc.Start();
+                sc.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(25));
+            }, ct).ConfigureAwait(false);
+            await Task.Delay(800, ct).ConfigureAwait(false);
+            bool daemon = await WarpCli.WaitForDaemonAsync(12000, ct).ConfigureAwait(false);
+            if (WarpCli.IsServiceRunning() && daemon)
+                return (true, "CloudflareWARP service restarted.");
+            if (WarpCli.IsServiceRunning())
+                return (false, "CloudflareWARP service is running but warp-cli daemon is not answering yet.");
+            return (false, "CloudflareWARP service did not come back after restart.");
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("RestartWarpServiceAsync: " + ex.Message);
+            return (false, "Could not restart CloudflareWARP: " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// warp-cli 2026 happy-eyeballs pairs IPv4 :443 with [::]:0 and fails in ~1s.
+    /// Unbind IPv6 on the default-route NIC for the handshake, then restore.
+    /// </summary>
+    public sealed class Ipv4HandshakeGuard : IAsyncDisposable
+    {
+        public List<string> DisabledNics { get; } = new();
+
+        public async ValueTask DisposeAsync()
+        {
+            foreach (string nic in DisabledNics)
+            {
+                try { await NetworkTool.EnableNicIPv6Async(nic).ConfigureAwait(false); }
+                catch { /* restore best-effort */ }
+            }
+            DisabledNics.Clear();
+        }
+    }
+
+    public static async Task<Ipv4HandshakeGuard> ForceIpv4HandshakeAsync(
+        IProgress<string>? progress,
+        CancellationToken ct)
+    {
+        var guard = new Ipv4HandshakeGuard();
+        try
+        {
+            foreach (NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                ct.ThrowIfCancellationRequested();
+                if (nic.OperationalStatus != OperationalStatus.Up) continue;
+                if (nic.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel)
+                    continue;
+                string name = nic.Name;
+                if (name.Contains("Cloudflare", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("WARP", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("Wintun", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (!nic.Supports(NetworkInterfaceComponent.IPv6)) continue;
+                bool hasV4Gateway = nic.GetIPProperties().GatewayAddresses
+                    .Any(g => g.Address != null && g.Address.AddressFamily == AddressFamily.InterNetwork);
+                if (!hasV4Gateway) continue;
+
+                progress?.Report($"Disabling IPv6 on {name} (WARP was racing [::]:0 and failing happy-eyeballs)…");
+                bool ok = await NetworkTool.DisableNicIPv6Async(name).ConfigureAwait(false);
+                WarpSessionLog.Step("ipv4", ok ? "disabled IPv6 on " + name : "failed to disable IPv6 on " + name,
+                    new Dictionary<string, object?> { ["nic"] = name, ["ok"] = ok });
+                if (ok) guard.DisabledNics.Add(name);
+            }
+            if (guard.DisabledNics.Count == 0)
+                progress?.Report("WARN: no NIC IPv6 to disable — happy-eyeballs may still use [::]:0.");
+            else
+                await Task.Delay(400, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("ForceIpv4HandshakeAsync: " + ex.Message);
+            progress?.Report("WARN IPv6 disable: " + ex.Message);
+        }
+        return guard;
+    }
+
+    /// <summary>
     /// When CF loc is missing/wrong (common under DPI), use Windows timezone + a second geo API.
     /// </summary>
     private static async Task<bool> DetectIranFallbackAsync(WarpCli.PublicIpInfo primary, Report report)
@@ -184,7 +285,7 @@ public static class WarpPreflight
             try
             {
                 using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(4) };
-                http.DefaultRequestHeaders.UserAgent.ParseAdd("DNSveil-GeoHide/3.5");
+                http.DefaultRequestHeaders.UserAgent.ParseAdd("DNSveil-GeoHide/3.6");
                 string body = await http.GetStringAsync("https://ipapi.co/country/").ConfigureAwait(false);
                 string cc = (body ?? "").Trim().Trim('"');
                 if (cc.Equals("IR", StringComparison.OrdinalIgnoreCase))

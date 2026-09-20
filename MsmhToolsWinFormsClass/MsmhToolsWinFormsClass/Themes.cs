@@ -1,4 +1,4 @@
-﻿using CustomControls;
+using CustomControls;
 using MsmhToolsClass;
 
 namespace MsmhToolsWinFormsClass.Themes;
@@ -289,30 +289,31 @@ public static class Theme
         }
         internal static void InitializeDark()
         {
-            BackColor = Color.DarkGray.ChangeBrightness(-0.8f);
-            BackColorDisabled = BackColor.ChangeBrightness(0.3f);
-            BackColorDarker = BackColor.ChangeBrightness(-0.3f);
-            BackColorDarkerDisabled = BackColorDarker.ChangeBrightness(0.3f);
-            BackColorMouseHover = BackColor.ChangeBrightness(0.1f);
-            BackColorMouseDown = BackColorMouseHover.ChangeBrightness(0.1f);
-            ForeColor = Color.LightGray;
-            ForeColorDisabled = ForeColor.ChangeBrightness(-0.3f);
-            Border = Color.DodgerBlue;
+            // DNSveil slate / cool blue
+            BackColor = Color.FromArgb(22, 27, 34);
+            BackColorDisabled = Color.FromArgb(40, 46, 54);
+            BackColorDarker = Color.FromArgb(13, 17, 23);
+            BackColorDarkerDisabled = Color.FromArgb(30, 35, 42);
+            BackColorMouseHover = Color.FromArgb(32, 40, 50);
+            BackColorMouseDown = Color.FromArgb(28, 35, 44);
+            ForeColor = Color.FromArgb(230, 237, 243);
+            ForeColorDisabled = Color.FromArgb(139, 148, 158);
+            Border = Color.FromArgb(56, 139, 253);
             if (OverrideColors) Border = OverrideBorderColor;
-            BorderDisabled = Border.ChangeBrightness(-0.3f);
-            Chunks = Color.DodgerBlue;
-            GridLines = ForeColor.ChangeBrightness(-0.5f);
-            GridLinesDisabled = GridLines.ChangeBrightness(-0.3f);
-            Link = ForeColor;
-            LinkActive = Color.IndianRed;
+            BorderDisabled = Color.FromArgb(48, 90, 160);
+            Chunks = Color.FromArgb(88, 166, 255);
+            GridLines = Color.FromArgb(48, 54, 61);
+            GridLinesDisabled = Color.FromArgb(40, 46, 54);
+            Link = Color.FromArgb(121, 192, 255);
+            LinkActive = Color.FromArgb(255, 123, 114);
             LinkVisited = Link;
-            Selection = Color.Black;
-            SelectionRectangle = Selection;
-            SelectionUnfocused = Selection.ChangeBrightness(0.3f);
+            Selection = Color.FromArgb(33, 78, 130);
+            SelectionRectangle = Color.FromArgb(56, 139, 253);
+            SelectionUnfocused = Color.FromArgb(45, 60, 80);
             Tick = Border;
-            TickDisabled = Tick.ChangeBrightness(-0.3f);
-            TitleBarBackColor = Color.DarkBlue;
-            TitleBarForeColor = Color.White;
+            TickDisabled = BorderDisabled;
+            TitleBarBackColor = Color.FromArgb(13, 17, 23);
+            TitleBarForeColor = Color.FromArgb(230, 237, 243);
             CC();
         }
 
