@@ -2,6 +2,25 @@ using System.Net;
 using System.Net.Sockets;
 using SecureDNSClient.GeoHide;
 
+if (args.Length > 0 && args[0] == "--fixture")
+{
+    if (args[1] == "echo")
+    {
+        Console.WriteLine(args[2]);
+        Console.Error.WriteLine("diagnostic");
+        return 7;
+    }
+    if (args[1] == "flood")
+    {
+        Console.Write(new string('x', 100_000));
+        Console.Error.Write(new string('y', 100_000));
+        return 0;
+    }
+    File.WriteAllText(args[2], Environment.ProcessId.ToString());
+    await Task.Delay(TimeSpan.FromMinutes(1));
+    return 0;
+}
+
 int failures = 0;
 void Check(bool condition, string name)
 {
@@ -47,4 +66,5 @@ using (var closedPort = new Socket(AddressFamily.InterNetwork, SocketType.Stream
     finally { fallback.Stop(); }
 }
 
+await ReliabilityChecks.RunAsync(Check);
 return failures == 0 ? 0 : 1;

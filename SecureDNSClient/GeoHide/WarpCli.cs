@@ -194,52 +194,43 @@ public static class WarpCli
         }
     }
 
+    private static readonly AsyncLocal<CancellationToken> OperationToken = new();
+
+    // The legacy connection engine uses synchronous CLI helpers. Run the engine on
+    // a worker and carry cancellation through every nested helper via async context.
+    internal static Task<T> RunOperationAsync<T>(Func<Task<T>> operation, CancellationToken ct)
+        => Task.Run(async () =>
+        {
+            CancellationToken previous = OperationToken.Value;
+            OperationToken.Value = ct;
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+                T result = await operation().ConfigureAwait(false);
+                ct.ThrowIfCancellationRequested();
+                return result;
+            }
+            finally { OperationToken.Value = previous; }
+        }, ct);
+
     public static Result Run(params string[] args)
+        => RunAsync(OperationToken.Value, args).GetAwaiter().GetResult();
+
+    public static async Task<Result> RunAsync(CancellationToken ct, params string[] args)
     {
+        ct.ThrowIfCancellationRequested();
         string? exe = FindExecutable();
         if (string.IsNullOrEmpty(exe))
             return new Result { ExitCode = -1, StdErr = "warp-cli not found. Install Cloudflare WARP first." };
+        return await WarpCommandRunner.RunAsync(exe, args, TimeSpan.FromSeconds(45), ct).ConfigureAwait(false);
+    }
 
-        try
-        {
-            using Process p = new();
-            p.StartInfo = new ProcessStartInfo
-            {
-                FileName = exe,
-                Arguments = string.Join(" ", args.Select(Quote)),
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                StandardOutputEncoding = Encoding.UTF8,
-                StandardErrorEncoding = Encoding.UTF8,
-            };
-            p.Start();
-
-            Task<string> outTask = p.StandardOutput.ReadToEndAsync();
-            Task<string> errTask = p.StandardError.ReadToEndAsync();
-            if (!Task.WaitAll(new Task[] { outTask, errTask }, 45_000))
-            {
-                try { p.Kill(entireProcessTree: true); } catch { /* ignore */ }
-                return new Result { ExitCode = -1, StdErr = "warp-cli timed out" };
-            }
-            if (!p.WaitForExit(5_000))
-            {
-                try { p.Kill(entireProcessTree: true); } catch { /* ignore */ }
-                return new Result { ExitCode = -1, StdErr = "warp-cli timed out" };
-            }
-
-            return new Result
-            {
-                ExitCode = p.ExitCode,
-                StdOut = (outTask.Result ?? "").Trim(),
-                StdErr = (errTask.Result ?? "").Trim()
-            };
-        }
-        catch (Exception ex)
-        {
-            return new Result { ExitCode = -1, StdErr = ex.Message };
-        }
+    internal static Task<Result> RunCleanupAsync(params string[] args)
+    {
+        string? exe = FindExecutable();
+        return string.IsNullOrEmpty(exe)
+            ? Task.FromResult(new Result { ExitCode = -1, StdErr = "warp-cli not found" })
+            : WarpCommandRunner.RunAsync(exe, args, TimeSpan.FromSeconds(5));
     }
 
     public static Result AcceptTos() => Run("accept-tos");
@@ -783,6 +774,11 @@ public static class WarpCli
         IProgress<string>? progress = null,
         CancellationToken ct = default,
         CensorshipOptions? censorship = null)
+        => await RunOperationAsync(() => TryConnectCoreAsync(endpoints, preferredProtocol, progress, ct, censorship), ct).ConfigureAwait(false);
+
+    private static async Task<(bool Ok, string Message, string? Endpoint, string Protocol)> TryConnectCoreAsync(
+        IEnumerable<string>? endpoints, string preferredProtocol, IProgress<string>? progress,
+        CancellationToken ct, CensorshipOptions? censorship)
     {
         censorship ??= new CensorshipOptions { Enabled = false, DpiAssist = false };
 
@@ -956,7 +952,7 @@ public static class WarpCli
                 }
                 finally
                 {
-                    try { Run("debug", "connectivity-check", "enable"); } catch { /* ignore */ }
+                    try { await RunCleanupAsync("debug", "connectivity-check", "enable").ConfigureAwait(false); } catch { /* ignore */ }
                     if (ipv4 != null)
                     {
                         progress?.Report("Restoring IPv6 on NICs…");
@@ -2099,53 +2095,58 @@ public static class WarpCli
         public string? Error { get; init; }
     }
 
-    public static async Task<PublicIpInfo> FetchPublicIpInfoAsync(int timeoutMs = 8000)
+    public static Task<PublicIpInfo> FetchPublicIpInfoAsync(int timeoutMs = 8000, CancellationToken ct = default)
+        => FetchPublicIpInfoCoreAsync(SharedHttp, timeoutMs, ct);
+
+    internal static async Task<PublicIpInfo> FetchPublicIpInfoCoreAsync(HttpClient http, int timeoutMs, CancellationToken ct)
     {
-        // Prefer endpoints that reliably include warp=/loc=/colo= under tunnel.
+        if (timeoutMs <= 0) throw new ArgumentOutOfRangeException(nameof(timeoutMs));
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ct, OperationToken.Value);
+        cancellation.Token.ThrowIfCancellationRequested();
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation.Token);
+        deadline.CancelAfter(timeoutMs);
         string[] urls =
         {
             "https://cloudflare.com/cdn-cgi/trace",
             "https://www.cloudflare.com/cdn-cgi/trace",
             "https://1.1.1.1/cdn-cgi/trace",
+            "https://api.ipify.org",
         };
-
-        string? lastErr = null;
-        foreach (string url in urls)
+        string? lastError = null;
+        var elapsed = Stopwatch.StartNew();
+        for (int i = 0; i < urls.Length; i++)
         {
+            cancellation.Token.ThrowIfCancellationRequested();
+            int remaining = timeoutMs - (int)elapsed.ElapsedMilliseconds;
+            if (remaining <= 0) break;
+            using var attempt = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
+            // Reserve a share of the total deadline for each remaining fallback.
+            attempt.CancelAfter(Math.Max(1, remaining / (urls.Length - i)));
             try
             {
-                using CancellationTokenSource cts = new(timeoutMs);
-                string body = await SharedHttp.GetStringAsync(url, cts.Token).ConfigureAwait(false);
-                var parsed = ParseCfTrace(body, url);
-                if (!string.IsNullOrEmpty(parsed.Ip) || parsed.WarpOn != null)
-                    return parsed;
-                lastErr = "trace missing ip/warp";
+                string body = await http.GetStringAsync(urls[i], attempt.Token).ConfigureAwait(false);
+                cancellation.Token.ThrowIfCancellationRequested();
+                if (i == urls.Length - 1)
+                {
+                    if (IPAddress.TryParse(body.Trim(), out var ip))
+                        return new PublicIpInfo { Ip = ip.ToString(), Source = "ipify", Error = "IP-only fallback; WARP status unknown." };
+                }
+                else
+                {
+                    var parsed = ParseCfTrace(body, urls[i]);
+                    if (IPAddress.TryParse(parsed.Ip, out _)) return parsed;
+                }
+                lastError = "Response did not contain a valid IP address.";
             }
-            catch (Exception ex)
+            catch (OperationCanceledException)
             {
-                lastErr = ex.Message;
-                Debug.WriteLine("FetchPublicIpInfoAsync " + url + ": " + ex.Message);
+                cancellation.Token.ThrowIfCancellationRequested();
+                lastError = "Public IP check timed out.";
             }
+            catch (HttpRequestException ex) { lastError = ex.Message; }
         }
-
-        // ipify is IP-only — never treat as warp confirmation.
-        try
-        {
-            using CancellationTokenSource cts = new(Math.Min(timeoutMs, 5000));
-            string ip = (await SharedHttp.GetStringAsync("https://api.ipify.org", cts.Token).ConfigureAwait(false)).Trim();
-            return new PublicIpInfo
-            {
-                Ip = ip,
-                WarpOn = null,
-                Source = "ipify",
-                Error = "ip-only fallback; warp unknown (" + (lastErr ?? "cf-trace failed") + ")",
-            };
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine("FetchPublicIpInfoAsync ipify: " + ex.Message);
-            return new PublicIpInfo { Error = lastErr ?? ex.Message, Source = "none" };
-        }
+        cancellation.Token.ThrowIfCancellationRequested();
+        return new PublicIpInfo { Source = "none", Error = lastError ?? "Public IP check timed out." };
     }
 
     private static PublicIpInfo ParseCfTrace(string body, string source)

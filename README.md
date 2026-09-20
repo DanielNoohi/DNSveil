@@ -9,7 +9,7 @@
 
 A hardened fork of [msasanmh/DNSveil](https://github.com/msasanmh/DNSveil) (Secure DNS Client) with **GeoHide WARP**, Iran-aware connect paths, and production-minded reliability work.
 
-**Latest:** [v3.6.9](https://github.com/DanielNoohi/DNSveil/releases/latest) · [Download portable x64](https://github.com/DanielNoohi/DNSveil/releases/latest)
+**Latest:** [v3.7.0](https://github.com/DanielNoohi/DNSveil/releases/latest) · [Download portable x64](https://github.com/DanielNoohi/DNSveil/releases/latest)
 
 ---
 
@@ -144,14 +144,16 @@ GeoHide does **not** ship Shecan / gaming Smart DNS / upstream-proxy presets any
 
 ---
 
-## Latest fixes — v3.6.9
+## What's new in v3.7.0
 
-- WARP reachability scanning now retains port 8443 when the port 443 probe fails and the fallback succeeds.
-- Candidate generation and reachability scanning honor requested result limits, including zero.
-- The single-instance lock stays alive until shutdown and recovers ownership after an abandoned lock.
-- Added six local regression checks. See [test instructions](Tests/RegressionTests/README.md).
+- **Responsive connection controls:** WARP connection work runs away from the window thread; CLI commands support cancellation and stop their child processes on timeout.
+- **Cancel across the workflow:** startup checks, refresh, connection attempts, service waits and automatic recovery use the active operation's cancellation. Closing the window waits for active cleanup.
+- **Bounded public-IP checks:** all fallback services share one overall deadline, invalid IP responses are rejected, and IP-only results never claim WARP is verified.
+- **Safer operation lifecycle:** controls prevent overlapping work and cancelled health watchers cannot queue a new recovery.
+- **Automated verification:** 19 isolated checks cover scanners, child processes, HTTP deadlines and UI lifecycle. GitHub runs them on pushes and pull requests.
+- **Repeatable releases:** `Scripts/Build-Release.ps1` tests, builds and verifies the x64 archive and checksum, and rejects placeholder helper binaries.
 
-The application builds and all six regression checks pass. Live WARP connectivity has not been verified for this release. Existing .NET 6 / dependency compatibility warnings remain.
+See [regression instructions](Tests/RegressionTests/README.md) and [release notes](RELEASE_NOTES.md). Live WARP connectivity remains unverified; existing .NET 6 / dependency compatibility warnings remain.
 
 ## Changelog (this fork)
 
@@ -159,6 +161,7 @@ Recent work focuses on GeoHide reliability under censorship:
 
 | Version | Focus |
 |---------|--------|
+| **3.7.0** | Responsive WARP operations, cancellation across recovery and preflight, bounded IP checks, 19 regression checks and Windows CI |
 | **3.6.9** | Correct WARP fallback port and scanner limits; retain single-instance lock; add regression checks |
 | **3.6.8** | IPv4-only handshake (stop [::]:0 happy-eyeballs); fake-packet DPI without splitting PQ ClientHello |
 | **3.6.7** | Stop endpoint-reset/:2408 first shot; honor pasted IP:443; MASQUE without FakeTTL first; wait for warp-cli daemon |

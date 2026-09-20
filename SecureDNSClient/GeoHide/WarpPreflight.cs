@@ -52,7 +52,7 @@ public static class WarpPreflight
             report.Notes.Add("CloudflareWARP service is running.");
 
         progress?.Report("Checking public IP / country / existing WARP…");
-        WarpCli.PublicIpInfo info = await WarpCli.FetchPublicIpInfoAsync(6000).ConfigureAwait(false);
+        WarpCli.PublicIpInfo info = await WarpCli.FetchPublicIpInfoAsync(6000, ct).ConfigureAwait(false);
         report.PublicIp = info.Ip;
         report.Loc = info.Loc;
         report.WarpOn = info.WarpOn;
@@ -60,7 +60,7 @@ public static class WarpPreflight
 
         report.LikelyIran = string.Equals(info.Loc, "IR", StringComparison.OrdinalIgnoreCase);
         if (!report.LikelyIran)
-            report.LikelyIran = await DetectIranFallbackAsync(info, report).ConfigureAwait(false);
+            report.LikelyIran = await DetectIranFallbackAsync(info, report, ct).ConfigureAwait(false);
 
         if (!string.IsNullOrEmpty(info.Ip))
             report.Notes.Add($"Public IP: {info.Ip}" + (string.IsNullOrEmpty(info.Loc) ? "" : $" [{info.Loc}]"));
@@ -89,11 +89,26 @@ public static class WarpPreflight
         return report;
     }
 
+    private static void WaitForService(ServiceController service, ServiceControllerStatus expected,
+        TimeSpan timeout, CancellationToken ct)
+    {
+        var elapsed = Stopwatch.StartNew();
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            service.Refresh();
+            if (service.Status == expected) return;
+            if (elapsed.Elapsed >= timeout) throw new System.TimeoutException("WARP service did not reach " + expected);
+            ct.WaitHandle.WaitOne(200);
+        }
+    }
+
     /// <summary>Start Windows service <c>CloudflareWARP</c> if stopped.</summary>
     public static async Task<(bool Ok, string Message, bool WasStopped)> EnsureWarpServiceAsync(
         IProgress<string>? progress = null,
         CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         try
         {
             if (WarpCli.IsServiceRunning())
@@ -108,7 +123,7 @@ public static class WarpPreflight
 
                 if (sc.Status == ServiceControllerStatus.StartPending)
                 {
-                    sc.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(25));
+                    WaitForService(sc, ServiceControllerStatus.Running, TimeSpan.FromSeconds(25), ct);
                     return;
                 }
 
@@ -119,7 +134,7 @@ public static class WarpPreflight
                         sc.Continue();
                     else
                         sc.Start();
-                    sc.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(25));
+                    WaitForService(sc, ServiceControllerStatus.Running, TimeSpan.FromSeconds(25), ct);
                 }
             }, ct).ConfigureAwait(false);
 
@@ -133,6 +148,7 @@ public static class WarpPreflight
                 "Could not start CloudflareWARP service. Start it from services.msc or open the official WARP app once.",
                 true);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (InvalidOperationException)
         {
             // Service name missing — fall back to process check / user action
@@ -171,10 +187,10 @@ public static class WarpPreflight
                     sc.Status == ServiceControllerStatus.StartPending)
                 {
                     sc.Stop();
-                    sc.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(20));
+                    WaitForService(sc, ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(20), ct);
                 }
                 sc.Start();
-                sc.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(25));
+                WaitForService(sc, ServiceControllerStatus.Running, TimeSpan.FromSeconds(25), ct);
             }, ct).ConfigureAwait(false);
             await Task.Delay(800, ct).ConfigureAwait(false);
             bool daemon = await WarpCli.WaitForDaemonAsync(12000, ct).ConfigureAwait(false);
@@ -184,6 +200,7 @@ public static class WarpPreflight
                 return (false, "CloudflareWARP service is running but warp-cli daemon is not answering yet.");
             return (false, "CloudflareWARP service did not come back after restart.");
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
             Debug.WriteLine("RestartWarpServiceAsync: " + ex.Message);
@@ -244,6 +261,11 @@ public static class WarpPreflight
             else
                 await Task.Delay(400, ct).ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            await guard.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
         catch (Exception ex)
         {
             Debug.WriteLine("ForceIpv4HandshakeAsync: " + ex.Message);
@@ -255,7 +277,7 @@ public static class WarpPreflight
     /// <summary>
     /// When CF loc is missing/wrong (common under DPI), use Windows timezone + a second geo API.
     /// </summary>
-    private static async Task<bool> DetectIranFallbackAsync(WarpCli.PublicIpInfo primary, Report report)
+    private static async Task<bool> DetectIranFallbackAsync(WarpCli.PublicIpInfo primary, Report report, CancellationToken ct)
     {
         try
         {
@@ -286,7 +308,7 @@ public static class WarpPreflight
             {
                 using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(4) };
                 http.DefaultRequestHeaders.UserAgent.ParseAdd("DNSveil-GeoHide/3.6");
-                string body = await http.GetStringAsync("https://ipapi.co/country/").ConfigureAwait(false);
+                string body = await http.GetStringAsync("https://ipapi.co/country/", ct).ConfigureAwait(false);
                 string cc = (body ?? "").Trim().Trim('"');
                 if (cc.Equals("IR", StringComparison.OrdinalIgnoreCase))
                 {
@@ -298,6 +320,7 @@ public static class WarpPreflight
                 if (cc.Length == 2)
                     report.Notes.Add($"Fallback geo country={cc} (ipapi.co).");
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
                 Debug.WriteLine("DetectIranFallbackAsync: " + ex.Message);

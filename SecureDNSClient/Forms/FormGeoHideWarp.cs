@@ -35,6 +35,8 @@ public class FormGeoHideWarp : Form
     private readonly CheckBox _chkDpiAssist = new();
     private readonly CheckBox _chkLowLatency = new();
     private readonly ToolTip _tips = new();
+    private readonly CancellationTokenSource _lifetime = new();
+    private bool _closing;
     private CancellationTokenSource? _cts;
     private CancellationTokenSource? _watchCts;
     private string? _activeEndpoint;
@@ -66,15 +68,27 @@ public class FormGeoHideWarp : Form
 
         Shown += async (_, _) =>
         {
-            await RunStartupPreflightAsync().ConfigureAwait(true);
+            using var operation = BeginOperation();
+            try { await RunStartupPreflightAsync(operation.Token).ConfigureAwait(true); }
+            catch (OperationCanceledException) { Log("Startup check cancelled."); }
+            catch (Exception ex) { Log("Startup check failed: " + ex.Message); }
+            finally { EndOperation(operation); }
         };
-        FormClosing += (_, _) =>
+        FormClosing += (_, e) =>
         {
+            // Keep the window alive until cancellation and network cleanup finish.
+            // Reopening it cannot start another operation while the old one is exiting.
+            e.Cancel = _busy;
+            if (_busy) _lblStatus.Text = "Status: cancelling before close…";
+            _closing = true;
+            _lifetime.Cancel();
             StopLinkWatch();
             try { _cts?.Cancel(); } catch { }
-            try { _cts?.Dispose(); } catch { }
-            _cts = null;
-            _tips.Dispose();
+            if (!_busy)
+            {
+                _tips.Dispose();
+                _lifetime.Dispose();
+            }
         };
     }
 
@@ -202,7 +216,13 @@ public class FormGeoHideWarp : Form
 
         _btnConnect.Click += async (_, _) => await ConnectAsync();
         _btnDisconnect.Click += async (_, _) => await DisconnectAsync();
-        _btnCancel.Click += (_, _) => { try { _cts?.Cancel(); } catch { } };
+        _btnCancel.Click += (_, _) =>
+        {
+            _btnCancel.Enabled = false;
+            _btnCancel.Text = "Cancelling…";
+            Log("Cancellation requested — finishing cleanup…");
+            try { _cts?.Cancel(); } catch { }
+        };
         _btnMinimize.Click += (_, _) => { WindowState = FormWindowState.Minimized; };
         _btnInstall.Click += (_, _) => OpenLinks.OpenUrl("https://one.one.one.one/");
         _btnHelp.Click += (_, _) => CustomMessageBox.Show(this, GeoHidePresets.HelpSummary, "GeoHide help",
@@ -303,7 +323,7 @@ public class FormGeoHideWarp : Form
             _chkDpiAssist.Checked = true;
     }
 
-    private async Task RunStartupPreflightAsync()
+    private async Task RunStartupPreflightAsync(CancellationToken ct)
     {
         if (!WarpCli.IsInstalled())
         {
@@ -313,7 +333,9 @@ public class FormGeoHideWarp : Form
         }
 
         Log("Running preflight (service / Iran IP / VPN conflict)…");
-        var report = await WarpPreflight.RunAsync(new Progress<string>(Log)).ConfigureAwait(true);
+        var progress = new Progress<string>(Log);
+        var report = await WarpCli.RunOperationAsync(() => WarpPreflight.RunAsync(progress, ct), ct).ConfigureAwait(true);
+        ct.ThrowIfCancellationRequested();
         foreach (string n in report.Notes) Log(n);
         foreach (string w in report.Warnings) Log("WARN: " + w);
 
@@ -378,6 +400,7 @@ public class FormGeoHideWarp : Form
     {
         try
         {
+            if (_closing || IsDisposed) return;
             if (InvokeRequired)
             {
                 BeginInvoke(() => Log(msg));
@@ -392,6 +415,7 @@ public class FormGeoHideWarp : Form
     {
         try
         {
+            if (_closing || IsDisposed) return;
             if (InvokeRequired)
             {
                 BeginInvoke(() => SetHealthUi(summary, ok));
@@ -406,9 +430,26 @@ public class FormGeoHideWarp : Form
         catch { }
     }
 
+    private CancellationTokenSource BeginOperation()
+    {
+        var operation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        _cts = operation;
+        _btnCancel.Text = "Cancel";
+        SetBusy(true);
+        return operation;
+    }
+
+    private void EndOperation(CancellationTokenSource operation)
+    {
+        if (ReferenceEquals(_cts, operation)) _cts = null;
+        SetBusy(false);
+        if (_closing && !IsDisposed) BeginInvoke(new Action(Close));
+    }
+
     private void SetBusy(bool busy)
     {
         _busy = busy;
+        if (_closing || IsDisposed) return;
         _btnConnect.Enabled = !busy;
         _btnDisconnect.Enabled = !busy;
         _btnRefresh.Enabled = !busy;
@@ -424,6 +465,9 @@ public class FormGeoHideWarp : Form
 
     private async Task RefreshStatusAsync(bool fromUser = false)
     {
+        if (_closing || (fromUser && _busy)) return;
+        using var refreshOperation = fromUser ? BeginOperation() : null;
+        CancellationToken ct = (_cts ?? _lifetime).Token;
         if (fromUser)
         {
             _lblStatus.Text = "Status: refreshing…";
@@ -446,7 +490,7 @@ public class FormGeoHideWarp : Form
             {
                 _lblStatus.Text = "Status: starting WARP service…";
                 var (svcOk, svcMsg, _) = await WarpPreflight.EnsureWarpServiceAsync(
-                    fromUser ? new Progress<string>(Log) : null).ConfigureAwait(true);
+                    fromUser ? new Progress<string>(Log) : null, ct).ConfigureAwait(true);
                 if (!svcOk)
                 {
                     _lblStatus.Text = "Status: WARP service not running";
@@ -460,14 +504,14 @@ public class FormGeoHideWarp : Form
                 _lblStatus.Text = "Status: WARP service not running";
             }
 
-            var st = await Task.Run(() => WarpCli.Status()).ConfigureAwait(true);
+            var st = await WarpCli.RunAsync(ct, "status").ConfigureAwait(true);
             string parsed = WarpCli.ParseStatus(st);
             if (!WarpCli.IsServiceRunning() && string.IsNullOrWhiteSpace(st.Combined))
                 _lblStatus.Text = "Status: WARP service not running";
             else
                 _lblStatus.Text = "Status: " + (string.IsNullOrWhiteSpace(parsed) ? "(empty)" : parsed);
 
-            var info = await WarpCli.FetchPublicIpInfoAsync(6000).ConfigureAwait(true);
+            var info = await WarpCli.FetchPublicIpInfoAsync(6000, ct).ConfigureAwait(true);
             string ipPart = info.Ip ?? "unavailable";
             string warpPart = info.WarpOn == true ? " · warp=on" : info.WarpOn == false ? " · warp=off" : " · warp=?";
             string locPart = string.IsNullOrEmpty(info.Loc) ? "" : $" · {info.Loc}";
@@ -480,32 +524,37 @@ public class FormGeoHideWarp : Form
                     (string.IsNullOrEmpty(info.Error) ? "" : $" ({info.Error})"));
             }
         }
+        catch (OperationCanceledException) when (fromUser) { Log("Refresh cancelled."); }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
+            if (_closing) return;
             _lblStatus.Text = "Status: refresh failed";
             if (fromUser) Log("Refresh error: " + ex.Message);
             else throw;
         }
         finally
         {
-            if (fromUser && !_busy)
-                _btnRefresh.Enabled = true;
+            if (refreshOperation != null) EndOperation(refreshOperation);
         }
     }
 
     private async Task DisconnectAsync()
     {
-        if (_busy) return;
+        if (_busy || _closing) return;
         StopLinkWatch();
-        SetBusy(true);
+        using var operation = BeginOperation();
         try
         {
-            var r = await Task.Run(() => WarpCli.Disconnect()).ConfigureAwait(true);
+            var r = await WarpCli.RunAsync(operation.Token, "disconnect").ConfigureAwait(true);
+            await WarpDpiAssist.StopAsync().ConfigureAwait(true);
             Log(r.Ok ? "Disconnected." : "Disconnect: " + r.ErrorLine);
             SetHealthUi("Health: idle", true);
             await RefreshStatusAsync().ConfigureAwait(true);
         }
-        finally { SetBusy(false); }
+        catch (OperationCanceledException) { Log("Disconnect cancelled."); }
+        catch (Exception ex) { Log("Disconnect failed: " + ex.Message); }
+        finally { EndOperation(operation); }
     }
 
     private void StopLinkWatch()
@@ -518,6 +567,7 @@ public class FormGeoHideWarp : Form
 
     private void StartLinkWatch(string? endpoint, string protocol, WarpCli.CensorshipOptions opt)
     {
+        if (_closing) return;
         StopLinkWatch();
         _activeEndpoint = endpoint;
         _activeProtocol = protocol;
@@ -549,7 +599,7 @@ public class FormGeoHideWarp : Form
 
         while (!ct.IsCancellationRequested)
         {
-            if (!WarpCli.IsConnected(WarpCli.Status()))
+            if (!WarpCli.IsConnected(await WarpCli.RunAsync(ct, "status").ConfigureAwait(false)))
             {
                 fails++;
                 SetHealthUi($"Health: down ({fails}/2)", false);
@@ -578,7 +628,7 @@ public class FormGeoHideWarp : Form
                 fails = 0;
                 SetHealthUi("Health: rotating…", false);
                 UiLog("Health: rotating to another address…");
-                await RotateFromWatchAsync().ConfigureAwait(false);
+                await RotateFromWatchAsync(ct).ConfigureAwait(false);
                 return;
             }
 
@@ -591,6 +641,7 @@ public class FormGeoHideWarp : Form
         try
         {
             if (IsDisposed) return;
+            if (_closing || IsDisposed) return;
             if (InvokeRequired)
             {
                 BeginInvoke(() => Log(msg));
@@ -601,9 +652,10 @@ public class FormGeoHideWarp : Form
         catch { }
     }
 
-    private async Task RotateFromWatchAsync()
+    private async Task RotateFromWatchAsync(CancellationToken ct)
     {
-        if (_busy) return;
+        ct.ThrowIfCancellationRequested();
+        if (_busy || _closing) return;
         string? from = _activeEndpoint;
         string proto = _activeProtocol;
         var opt = _lastOpt ?? new WarpCli.CensorshipOptions
@@ -615,28 +667,30 @@ public class FormGeoHideWarp : Form
             MaxConnectAttempts = 10,
         };
 
-        var tcs = new TaskCompletionSource<bool>();
-        void Work() => _ = RotateUiAsync(from, proto, opt, tcs);
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        void Work() => _ = RotateUiAsync(from, proto, opt, tcs, ct);
         if (InvokeRequired) BeginInvoke(Work);
         else Work();
-        await tcs.Task.ConfigureAwait(false);
+        await tcs.Task.WaitAsync(ct).ConfigureAwait(false);
     }
 
     private async Task RotateUiAsync(
         string? from,
         string proto,
         WarpCli.CensorshipOptions opt,
-        TaskCompletionSource<bool> done)
+        TaskCompletionSource<bool> done,
+        CancellationToken watchToken)
     {
-        if (_busy)
+        if (_busy || _closing || watchToken.IsCancellationRequested)
         {
             done.TrySetResult(false);
             return;
         }
-        SetBusy(true);
+        using var rotateCts = BeginOperation();
+        using var watchCancellation = watchToken.Register(() => rotateCts.Cancel());
+        rotateCts.CancelAfter(TimeSpan.FromMinutes(4));
         try
         {
-            using var rotateCts = new CancellationTokenSource(TimeSpan.FromMinutes(4));
             var progress = new Progress<string>(msg =>
             {
                 Log(msg);
@@ -697,6 +751,7 @@ public class FormGeoHideWarp : Form
         catch (OperationCanceledException)
         {
             WarpSessionLog.End(false, "rotate cancelled");
+            try { await WarpCli.RunCleanupAsync("disconnect").ConfigureAwait(true); } catch { }
             try { await WarpDpiAssist.StopAsync().ConfigureAwait(true); } catch { }
             done.TrySetResult(false);
         }
@@ -709,13 +764,14 @@ public class FormGeoHideWarp : Form
         }
         finally
         {
-            SetBusy(false);
+            EndOperation(rotateCts);
+            done.TrySetResult(false);
         }
     }
 
     private async Task ConnectAsync()
     {
-        if (_busy) return;
+        if (_busy || _closing) return;
         if (!WarpCli.IsInstalled())
         {
             Log("Install Cloudflare WARP first (Get WARP…), then retry Connect.");
@@ -723,10 +779,10 @@ public class FormGeoHideWarp : Form
             return;
         }
 
-        SetBusy(true);
         StopLinkWatch();
-        _cts?.Dispose();
-        _cts = new CancellationTokenSource();
+        using var operation = BeginOperation();
+        CancellationToken ct = operation.Token;
+        bool connectionStarted = false;
         var progress = new Progress<string>(msg =>
         {
             Log(msg);
@@ -735,7 +791,8 @@ public class FormGeoHideWarp : Form
         bool sessionEnded = false;
         try
         {
-            var pre = await WarpPreflight.RunAsync(progress, _cts.Token).ConfigureAwait(true);
+            var pre = await WarpCli.RunOperationAsync(() => WarpPreflight.RunAsync(progress, ct), ct).ConfigureAwait(true);
+            ct.ThrowIfCancellationRequested();
             foreach (string w in pre.Warnings) Log("WARN: " + w);
 
             if (!pre.ServiceRunning)
@@ -820,8 +877,10 @@ public class FormGeoHideWarp : Form
                 Log($"Connecting {selected}…");
             }
 
+            ct.ThrowIfCancellationRequested();
+            connectionStarted = true;
             var (ok, message, ep, usedProtocol) = await WarpCli.TryConnectWithFallbackAsync(
-                endpointList, protocol, progress, _cts.Token, opt).ConfigureAwait(true);
+                endpointList, protocol, progress, ct, opt).ConfigureAwait(true);
             Log(message);
             WarpSessionLog.End(ok, message,
                 new Dictionary<string, object?>
@@ -865,12 +924,11 @@ public class FormGeoHideWarp : Form
             sessionEnded = true;
             try
             {
-                await Task.Run(() =>
+                if (connectionStarted)
                 {
-                    WarpCli.Disconnect();
-                    WarpCli.ResetEndpoint();
-                }).ConfigureAwait(true);
-                await WarpDpiAssist.StopAsync().ConfigureAwait(true);
+                    await WarpCli.RunCleanupAsync("disconnect").ConfigureAwait(true);
+                    await WarpDpiAssist.StopAsync().ConfigureAwait(true);
+                }
             }
             catch { }
         }
@@ -883,7 +941,7 @@ public class FormGeoHideWarp : Form
         }
         finally
         {
-            SetBusy(false);
+            EndOperation(operation);
         }
     }
 }

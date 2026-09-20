@@ -1,28 +1,21 @@
-# DNSveil v3.6.9
+# DNSveil v3.7.0 — connection reliability overhaul
 
-## Latest bug fixes
+## Improvements
 
-- Correct WARP endpoint selection after fallback: if TCP port 443 fails but 8443 responds, retain 8443 for the connection attempt.
-- Honor candidate and reachability result limits, including zero and negative limits.
-- Keep the single-instance mutex alive throughout the app session, release it on shutdown, and handle abandoned mutex ownership after a crash.
-- Add six local regression checks covering scanner limits and fallback selection.
+- Move the WARP connection engine off the window thread so long CLI commands do not freeze controls.
+- Add cancellable CLI execution with safe argument handling, concurrent output draining, process-tree termination and bounded cleanup.
+- Make Cancel control startup checks, refresh, connect and automatic recovery. Prevent overlapping operations and discard recovery work from cancelled health watchers.
+- Keep the window alive while active cancellation cleanup completes; avoid disposing cancellation state while it is still in use.
+- Make service readiness waits and fallback country checks cancellable. Restore temporary IPv6 changes if handshake preparation is cancelled.
+- Give public-IP lookups one overall deadline across fallback services. Reject malformed IP addresses and keep IP-only results distinct from verified WARP connectivity.
+- Add Windows GitHub build/regression checks and a repeatable release script that rejects placeholder helper binaries and verifies archive integrity and SHA-256 checksums.
 
-## Previously unpublished changes since v3.5.11
+## Validation
 
-This release also includes the local development changes documented as v3.5.12 through v3.6.8:
+19 isolated regression checks cover endpoint limits and fallback ports, process output and arguments, timeout/cancellation cleanup, public-IP responses and deadlines, operation controls, stale recovery and form closure. Tests use local child processes, loopback listeners and simulated HTTP responses; they do not change DNS, proxy, service or tunnel settings.
 
-- Revised GeoHide WARP connection flows, MASQUE preferences, daemon readiness checks, and DPI-assist profiles.
-- Updated GeoHide controls, application branding, dark styling, high-DPI layout, and tray messaging.
-- Process timeout cleanup and startup connectivity handling updates.
-- WARP-focused guides and removal of the bundled Smart DNS / upstream-proxy presets. Custom rules remain available.
-
-## Validation and limitations
-
-- Application build succeeds and all six local scanner regression checks pass.
-- Release packaging targets Windows x64 and requires .NET Desktop 6 and ASP.NET Core 6 runtimes.
-- Live WARP connectivity and the full interactive UI have not been tested for this release.
-- Existing .NET 6 and dependency compatibility warnings remain.
+Live WARP connectivity and a full interactive UI session have not been verified. Existing .NET 6 / dependency compatibility warnings remain. This release does not claim increased throughput or new censorship-bypass success rates.
 
 ## Download
 
-Download `SecureDNSClientPortable_v3.6.9_x64.7z`, extract it, and run `SecureDNSClientPortable.exe`. Administrator privileges are required for DPI / WinDivert functionality. SHA-256 verification is provided in `SHA256SUMS.txt`.
+Download `SecureDNSClientPortable_v3.7.0_x64.7z`, extract it, and run `SecureDNSClientPortable.exe`. Windows x64, .NET Desktop 6 and ASP.NET Core 6 runtimes are required. DPI / WinDivert functionality requires administrator privileges. Verify the download using `SHA256SUMS.txt`.
