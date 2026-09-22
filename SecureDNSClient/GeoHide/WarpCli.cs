@@ -785,6 +785,7 @@ public static class WarpCli
         CancellationToken ct, CensorshipOptions opt)
     {
         var requested = endpoints?.ToList();
+        var attemptedEndpoints = new HashSet<string>(requested ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
         var result = await WarpRegionalSearch.RunAsync(async (round, token) =>
         {
             string candidateProtocol = round == 1
@@ -792,10 +793,11 @@ public static class WarpCli
                 : protocol;
             IEnumerable<string>? candidate = round == 0 ? requested : null;
             if (round == 2 && candidateProtocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
-                candidate = new[] { MasqueTcpEndpoints.FirstOrDefault(ep => requested == null || !requested.Contains(ep)) ?? MasqueTcpEndpoints[0] };
+                candidate = new[] { MasqueTcpEndpoints.FirstOrDefault(ep => !attemptedEndpoints.Contains(ep)) ?? MasqueTcpEndpoints[0] };
             var connected = await RunOperationAsync(() => TryConnectCoreAsync(candidate, candidateProtocol, progress, token,
                 opt with { TryExitOutsideIran = false, MaxConnectAttempts = 1, RequireLinkQuality = false,
                     TryWireGuardUpgrade = false, ApplyIranExcludes = false, DpiAssist = false }), token).ConfigureAwait(false);
+            if (connected.Endpoint != null) attemptedEndpoints.Add(connected.Endpoint);
             return new WarpRegionalSearch.Connection(connected.Ok, connected.Message, connected.Endpoint, connected.Protocol);
         }, WarpExitCheck.FetchAsync, async connection =>
         {
