@@ -34,6 +34,7 @@ public class FormGeoHideWarp : Form
     private readonly CheckBox _chkCensorship = new();
     private readonly CheckBox _chkDpiAssist = new();
     private readonly CheckBox _chkLowLatency = new();
+    private readonly CheckBox _chkRegionalExit = new();
     private readonly ToolTip _tips = new();
     private readonly CancellationTokenSource _lifetime = new();
     private bool _closing;
@@ -104,7 +105,7 @@ public class FormGeoHideWarp : Form
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 108)); // header
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));  // endpoint row
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));  // actions
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 78));  // options
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 106));  // options
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // log
 
         // ---- Header status strip ----
@@ -260,7 +261,10 @@ public class FormGeoHideWarp : Form
         _chkLowLatency.CheckedChanged += (_, _) => SyncOptionConflicts(fromUser: true);
         _tips.SetToolTip(_chkLowLatency, "Stop DPI after connect; keep WARP DNS; Iran excludes off for stability.");
 
-        rowOpt.Controls.AddRange(new Control[] { _chkCensorship, _chkDpiAssist, _chkLowLatency });
+        _chkRegionalExit.AutoSize = true;
+        _chkRegionalExit.Text = "Try exit outside Iran (experimental)";
+        _tips.SetToolTip(_chkRegionalExit, "Tries both tunnel protocols for up to 2 minutes. Requires verified IPv4 and IPv6 countries outside IR. WARP may never provide one. Not a kill switch or guarantee of service access.");
+        rowOpt.Controls.AddRange(new Control[] { _chkCensorship, _chkDpiAssist, _chkLowLatency, _chkRegionalExit });
 
         // ---- Log ----
         _log.Dock = DockStyle.Fill;
@@ -459,6 +463,7 @@ public class FormGeoHideWarp : Form
         _chkCensorship.Enabled = !busy;
         _chkDpiAssist.Enabled = !busy;
         _chkLowLatency.Enabled = !busy;
+        _chkRegionalExit.Enabled = !busy;
         _btnMinimize.Enabled = true;
         _btnLogs.Enabled = true;
     }
@@ -515,7 +520,9 @@ public class FormGeoHideWarp : Form
             string ipPart = info.Ip ?? "unavailable";
             string warpPart = info.WarpOn == true ? " · warp=on" : info.WarpOn == false ? " · warp=off" : " · warp=?";
             string locPart = string.IsNullOrEmpty(info.Loc) ? "" : $" · {info.Loc}";
-            string coloPart = string.IsNullOrEmpty(info.Colo) ? "" : $" · colo {info.Colo}";
+            string coloPart = string.IsNullOrEmpty(info.Colo) ? "" : $" · data center {info.Colo}";
+            if (info.WarpOn == true && string.Equals(info.Loc, "IR", StringComparison.OrdinalIgnoreCase))
+                Log("Exit country is still Iran. Connected does not mean regional restrictions are removed.");
             _lblIp.Text = "Public IP: " + ipPart + warpPart + locPart + coloPart;
 
             if (fromUser)
@@ -599,6 +606,19 @@ public class FormGeoHideWarp : Form
 
         while (!ct.IsCancellationRequested)
         {
+            if (_lastOpt?.TryExitOutsideIran == true)
+            {
+                var exit = await WarpExitCheck.FetchAsync(ct).ConfigureAwait(false);
+                UiLog("Exit recheck: " + exit.Summary);
+                if (!exit.IsOutside("IR"))
+                {
+                    ct.ThrowIfCancellationRequested();
+                    await WarpCli.RunAsync(ct, "disconnect").ConfigureAwait(false);
+                    SetHealthUi("Exit country changed or unverified — reconnect manually", false);
+                    UiLog("WARP was asked to disconnect because the exit requirement is no longer verified. Normal Internet traffic is not blocked.");
+                    return;
+                }
+            }
             if (!WarpCli.IsConnected(await WarpCli.RunAsync(ct, "status").ConfigureAwait(false)))
             {
                 fails++;
@@ -855,6 +875,7 @@ public class FormGeoHideWarp : Form
                 LowLatency = lowLatency,
                 TryWireGuardUpgrade = false,
                 ApplyIranExcludes = false,
+                TryExitOutsideIran = _chkRegionalExit.Checked,
                 RequireLinkQuality = !censorship,
                 MaxCandidates = censorship ? 48 : 24,
                 MaxConnectAttempts = censorship ? 14 : 8,
@@ -862,6 +883,8 @@ public class FormGeoHideWarp : Form
                 ProbeTimeoutMs = 400,
             };
             _lastOpt = opt;
+            if (opt.TryExitOutsideIran)
+                Log("Experimental country search: tries both protocols; no account access guarantee. Normal Internet traffic is not blocked if the search fails.");
 
             List<string>? endpointList;
             if (!hasSpecific)
@@ -907,7 +930,9 @@ public class FormGeoHideWarp : Form
             if (ok)
             {
                 StartLinkWatch(ep, usedProtocol, opt);
-                Log("Connected — remotes should see a Cloudflare IP. Minimize anytime; WARP stays up.");
+                Log(opt.TryExitOutsideIran
+                    ? "Both tested routes reported outside Iran. Services may use different location data; login, playback and games are not verified."
+                    : "WARP connected. Your exit may still be located in Iran; a Frankfurt data center does not change that.");
                 SetHealthUi("Health: watching…", true);
             }
             else

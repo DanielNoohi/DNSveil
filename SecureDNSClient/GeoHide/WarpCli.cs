@@ -108,6 +108,8 @@ public static class WarpCli
         public int CidrSamplePerRange { get; init; } = 16;
         /// <summary>Reject Connected endpoints that fail RTT/download quality (rotate to next).</summary>
         public bool RequireLinkQuality { get; init; } = true;
+        /// <summary>Experimental: try both protocols, accepting only verified IPv4/IPv6 exits outside IR.</summary>
+        public bool TryExitOutsideIran { get; init; } = false;
     }
 
     /// <summary>Last probed connect queue — used by health watch to rotate without a full rescan.</summary>
@@ -774,7 +776,36 @@ public static class WarpCli
         IProgress<string>? progress = null,
         CancellationToken ct = default,
         CensorshipOptions? censorship = null)
-        => await RunOperationAsync(() => TryConnectCoreAsync(endpoints, preferredProtocol, progress, ct, censorship), ct).ConfigureAwait(false);
+        => await RunOperationAsync(() => censorship?.TryExitOutsideIran == true
+            ? TryRegionalExitAsync(endpoints, preferredProtocol, progress, ct, censorship)
+            : TryConnectCoreAsync(endpoints, preferredProtocol, progress, ct, censorship), ct).ConfigureAwait(false);
+
+    private static async Task<(bool Ok, string Message, string? Endpoint, string Protocol)> TryRegionalExitAsync(
+        IEnumerable<string>? endpoints, string protocol, IProgress<string>? progress,
+        CancellationToken ct, CensorshipOptions opt)
+    {
+        var requested = endpoints?.ToList();
+        var result = await WarpRegionalSearch.RunAsync(async (round, token) =>
+        {
+            string candidateProtocol = round == 1
+                ? (protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase) ? "WireGuard" : "MASQUE")
+                : protocol;
+            IEnumerable<string>? candidate = round == 0 ? requested : null;
+            if (round == 2 && candidateProtocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase))
+                candidate = new[] { MasqueTcpEndpoints.FirstOrDefault(ep => requested == null || !requested.Contains(ep)) ?? MasqueTcpEndpoints[0] };
+            var connected = await RunOperationAsync(() => TryConnectCoreAsync(candidate, candidateProtocol, progress, token,
+                opt with { TryExitOutsideIran = false, MaxConnectAttempts = 1, RequireLinkQuality = false,
+                    TryWireGuardUpgrade = false, ApplyIranExcludes = false, DpiAssist = false }), token).ConfigureAwait(false);
+            return new WarpRegionalSearch.Connection(connected.Ok, connected.Message, connected.Endpoint, connected.Protocol);
+        }, WarpExitCheck.FetchAsync, async connection =>
+        {
+            if (connection?.Endpoint != null) WarpSuccessCache.Demote(connection.Endpoint);
+            Result disconnected = await RunCleanupAsync("disconnect").ConfigureAwait(false);
+            if (!disconnected.Ok) progress?.Report("WARN: disconnect was not confirmed: " + disconnected.ErrorLine);
+            await WarpDpiAssist.StopAsync().ConfigureAwait(false);
+        }, "IR", progress, ct).ConfigureAwait(false);
+        return (result.Ok, result.Message, result.Endpoint, result.Protocol);
+    }
 
     private static async Task<(bool Ok, string Message, string? Endpoint, string Protocol)> TryConnectCoreAsync(
         IEnumerable<string>? endpoints, string preferredProtocol, IProgress<string>? progress,
@@ -892,7 +923,8 @@ public static class WarpCli
                     }
                     catch { /* IRCF is optional */ }
 
-                    List<string> masqueTargets = BuildMasqueTargetList(endpoints, ircf443);
+                    List<string> masqueTargets = BuildMasqueTargetList(endpoints, ircf443)
+                        .Take(Math.Max(1, censorship.MaxConnectAttempts)).ToList();
                     progress?.Report("MASQUE targets: " + string.Join(", ", masqueTargets.Take(8)) +
                                      (masqueTargets.Count > 8 ? "…" : ""));
 

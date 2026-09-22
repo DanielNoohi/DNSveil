@@ -9,7 +9,7 @@
 
 A hardened fork of [msasanmh/DNSveil](https://github.com/msasanmh/DNSveil) (Secure DNS Client) with **GeoHide WARP**, Iran-aware connect paths, and production-minded reliability work.
 
-**Latest:** [v3.7.0](https://github.com/DanielNoohi/DNSveil/releases/latest) · [Download portable x64](https://github.com/DanielNoohi/DNSveil/releases/latest)
+**Latest:** [v3.8.0](https://github.com/DanielNoohi/DNSveil/releases/latest) · [Download portable x64](https://github.com/DanielNoohi/DNSveil/releases/latest)
 
 ---
 
@@ -144,16 +144,15 @@ GeoHide does **not** ship Shecan / gaming Smart DNS / upstream-proxy presets any
 
 ---
 
-## What's new in v3.7.0
+## What's new in v3.8.0
 
-- **Responsive connection controls:** WARP connection work runs away from the window thread; CLI commands support cancellation and stop their child processes on timeout.
-- **Cancel across the workflow:** startup checks, refresh, connection attempts, service waits and automatic recovery use the active operation's cancellation. Closing the window waits for active cleanup.
-- **Bounded public-IP checks:** all fallback services share one overall deadline, invalid IP responses are rejected, and IP-only results never claim WARP is verified.
-- **Safer operation lifecycle:** controls prevent overlapping work and cancelled health watchers cannot queue a new recovery.
-- **Automated verification:** 19 isolated checks cover scanners, child processes, HTTP deadlines and UI lifecycle. GitHub runs them on pushes and pull requests.
-- **Repeatable releases:** `Scripts/Build-Release.ps1` tests, builds and verifies the x64 archive and checksum, and rejects placeholder helper binaries.
+**Experimental exit-country search:** open Tools → GeoHide WARP, enable **Try exit outside Iran (experimental)**, then Connect. DNSveil tries both tunnel protocols in at most three rounds with a two-minute search budget, followed by cleanup. It accepts an exit only when direct IPv4 and IPv6 checks both report WARP on and a known country outside IR. If either family still reports Iran or cannot be verified, it rejects the attempt. An unavailable IPv6 route is treated as unverified, not automatically safe.
 
-See [regression instructions](Tests/RegressionTests/README.md) and [release notes](RELEASE_NOTES.md). Live WARP connectivity remains unverified; existing .NET 6 / dependency compatibility warnings remain.
+Cloudflare controls exit assignment. **This feature may find no qualifying exit, and no successful country change has been demonstrated on the affected network.** A Frankfurt (`FRA`) data center does not mean a German exit country. Changing the observed country also does not verify Spotify playback, ChatGPT login, or game access; services may use different location databases or account restrictions.
+
+The option is off by default. It temporarily tries both protocols without DPI assist. When enabled, the health watcher rechecks both families and requests a disconnect if the requirement stops being verified. **This is not a kill switch:** normal Internet traffic remains possible during attempts, after failure, and between checks. The app does not spoof GPS, change account regions, or provide a new VPN/server.
+
+The suite now has 32 isolated regression checks. See [test instructions](Tests/RegressionTests/README.md) and [release notes](RELEASE_NOTES.md). Existing .NET 6 / dependency warnings remain.
 
 ## Changelog (this fork)
 
@@ -161,6 +160,7 @@ Recent work focuses on GeoHide reliability under censorship:
 
 | Version | Focus |
 |---------|--------|
+| **3.8.0** | Experimental bounded exit-country search, separate IPv4/IPv6 verification, truthful country status and 32 regression checks |
 | **3.7.0** | Responsive WARP operations, cancellation across recovery and preflight, bounded IP checks, 19 regression checks and Windows CI |
 | **3.6.9** | Correct WARP fallback port and scanner limits; retain single-instance lock; add regression checks |
 | **3.6.8** | IPv4-only handshake (stop [::]:0 happy-eyeballs); fake-packet DPI without splitting PQ ClientHello |

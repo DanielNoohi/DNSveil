@@ -1,21 +1,26 @@
-# DNSveil v3.7.0 — connection reliability overhaul
+# DNSveil v3.8.0 — experimental exit-country search
 
-## Improvements
+## What changed
 
-- Move the WARP connection engine off the window thread so long CLI commands do not freeze controls.
-- Add cancellable CLI execution with safe argument handling, concurrent output draining, process-tree termination and bounded cleanup.
-- Make Cancel control startup checks, refresh, connect and automatic recovery. Prevent overlapping operations and discard recovery work from cancelled health watchers.
-- Keep the window alive while active cancellation cleanup completes; avoid disposing cancellation state while it is still in use.
-- Make service readiness waits and fallback country checks cancellable. Restore temporary IPv6 changes if handshake preparation is cancelled.
-- Give public-IP lookups one overall deadline across fallback services. Reject malformed IP addresses and keep IP-only results distinct from verified WARP connectivity.
-- Add Windows GitHub build/regression checks and a repeatable release script that rejects placeholder helper binaries and verifies archive integrity and SHA-256 checksums.
+- Add an opt-in **Try exit outside Iran (experimental)** checkbox in GeoHide WARP.
+- Try the selected protocol, an alternate protocol, and another candidate in at most three rounds within a two-minute search budget plus cleanup. Experiments run without DPI assist.
+- Verify direct IPv4 and IPv6 exits separately with normal HTTPS certificate validation. Accept only known non-IR country observations with WARP on for both families. Unknown or unavailable families do not pass.
+- Recheck the country requirement during health monitoring and request disconnection when it is no longer verified.
+- Clarify that exit country and Cloudflare data-center location are different. A connected tunnel is not evidence of unrestricted service access.
+- Add 13 regression checks for country evidence, mixed IP families, bounded search, acceptance and cancellation cleanup (32 checks total).
 
-## Validation
+## How to use
 
-19 isolated regression checks cover endpoint limits and fallback ports, process output and arguments, timeout/cancellation cleanup, public-IP responses and deadlines, operation controls, stale recovery and form closure. Tests use local child processes, loopback listeners and simulated HTTP responses; they do not change DNS, proxy, service or tunnel settings.
+Extract the portable archive, run `SecureDNSClientPortable.exe`, open Tools → GeoHide WARP, select **Try exit outside Iran (experimental)**, then Connect. Read the reported IPv4 and IPv6 countries. The option is off by default.
 
-Live WARP connectivity and a full interactive UI session have not been verified. Existing .NET 6 / dependency compatibility warnings remain. This release does not claim increased throughput or new censorship-bypass success rates.
+## Limits
+
+Cloudflare controls exit assignment. No successful change of country has been demonstrated on the affected network. This may find no qualifying exit. A different observed country does not guarantee Spotify playback, ChatGPT login, or Where Winds Meet access, and Cloudflare's location data may differ from a service's data.
+
+This is not a kill switch. Normal Internet traffic remains possible during attempts, after failure, and between checks. The app does not change GPS permissions, account regions, or supply another VPN/server. A missing IPv6 observation causes rejection even if that route might simply be unavailable.
+
+Validation uses simulated connections and local fixtures; no live region-unblocking claim is made. Existing .NET 6 / dependency warnings remain.
 
 ## Download
 
-Download `SecureDNSClientPortable_v3.7.0_x64.7z`, extract it, and run `SecureDNSClientPortable.exe`. Windows x64, .NET Desktop 6 and ASP.NET Core 6 runtimes are required. DPI / WinDivert functionality requires administrator privileges. Verify the download using `SHA256SUMS.txt`.
+`SecureDNSClientPortable_v3.8.0_x64.7z` and `SHA256SUMS.txt`. Requires Windows x64, .NET Desktop 6 and ASP.NET Core 6 runtimes. Administrator privileges are needed for DPI / WinDivert and related adapter operations.

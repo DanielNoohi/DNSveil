@@ -68,4 +68,5 @@ using (var closedPort = new Socket(AddressFamily.InterNetwork, SocketType.Stream
 }
 
 await ReliabilityChecks.RunAsync(Check);
+await RegionalChecks.RunAsync(Check);
 return failures == 0 ? 0 : 1;
