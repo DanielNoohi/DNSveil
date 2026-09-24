@@ -12,6 +12,9 @@ namespace SecureDNSClient;
 
 public partial class FormMain : Form
 {
+    private TabPage? _geoHidePage;
+    private FormGeoHideWarp? _geoHideView;
+
     public FormMain()
     {
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
@@ -60,15 +63,23 @@ public partial class FormMain : Form
             btnGeoHide.Click += (_, _) =>
             {
                 if (IsExiting) return;
-                Form? open = Application.OpenForms[nameof(FormGeoHideWarp)];
-                if (open != null) { open.BringToFront(); open.WindowState = FormWindowState.Normal; return; }
-                FormGeoHideWarp f = new()
+                if (_geoHidePage == null)
                 {
-                    StartPosition = FormStartPosition.CenterParent,
-                    Owner = this,
-                    ShowInTaskbar = true,
-                };
-                f.Show(this);
+                    _geoHidePage = new TabPage("GeoHide") { AutoScroll = true, Name = "TabPageGeoHide" };
+                    _geoHideView = new FormGeoHideWarp {
+                        TopLevel = false, FormBorderStyle = FormBorderStyle.None, ShowInTaskbar = false,
+                        Location = Point.Empty
+                    };
+                    _geoHidePage.Controls.Add(_geoHideView);
+                    _geoHidePage.Resize += (_, _) => {
+                        _geoHideView.Size = new Size(Math.Max(850, _geoHidePage.ClientSize.Width),
+                            Math.Max(760, _geoHidePage.ClientSize.Height));
+                    };
+                    CustomTabControlMain.TabPages.Add(_geoHidePage);
+                    CustomTabControlMain.SelectedTab = _geoHidePage;
+                    _geoHideView.Show();
+                }
+                CustomTabControlMain.SelectedTab = _geoHidePage;
             };
             TabPageTools.Controls.Add(btnGeoHide);
             TabPageTools.Controls.Add(lblGeoSub);

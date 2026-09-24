@@ -1,3 +1,12 @@
+# v4.0.1
+
+- GeoHide is embedded in the main DNSveil window, with Official and Advanced WARP tabs. Reopening it selects the existing page.
+- Tray → Exit waits for the embedded advanced tunnel to stop; changing main-app pages keeps the connection running.
+- Advanced WARP requires verified IPv4 and IPv6 exits outside Iran by default. Working Iranian exits are explicitly labeled, and verified non-IR candidates rank ahead of faster Iranian candidates.
+- Connected status keeps both country results visible. Connection failures retain their explanation.
+- Validation: 73 regression checks passed, including embedded-view closure, regional candidate ranking, real local TCP/UDP forwarding and pinned backend configuration validation.
+- WARP-on-WARP can still return IR. This update does not guarantee a different country or game/service access.
+
 # DNSveil v4.0.0 — Advanced WARP, inspired by BPB
 
 ## New backend

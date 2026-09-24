@@ -13,7 +13,7 @@ internal sealed class FormGeoHideXray : Form
     private readonly CheckBox noise = new() { Text = "Warp Pro noise", Checked = true, AutoSize = true };
     private readonly NumericUpDown count = Number(1, 10, 5), sizeMin = Number(1, 1280, 50), sizeMax = Number(1, 1280, 100),
         delayMin = Number(0, 100, 1), delayMax = Number(0, 100, 5);
-    private readonly CheckBox strict = new() { Text = "Require both exit countries outside Iran (may not connect)", AutoSize = true };
+    private readonly CheckBox strict = new() { Text = "Require both exit countries outside Iran (may not connect)", Checked = true, AutoSize = true };
     private readonly CheckBox terms = new() { Text = "I accept Cloudflare's terms for creating WARP profiles", AutoSize = true };
     private readonly TextBox endpoints = new() { Multiline = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill };
     private readonly DataGridView results = new() { Dock = DockStyle.Fill, ReadOnly = true, AllowUserToAddRows = false,
@@ -33,8 +33,11 @@ internal sealed class FormGeoHideXray : Form
     private readonly string tools = Path.Combine(AppContext.BaseDirectory, "Backends");
     private string? reportPath;
 
+    internal bool HasActiveWork => operation != null || session != null;
+
     internal FormGeoHideXray()
     {
+        Name = nameof(FormGeoHideXray);
         Text = "DNSveil — Advanced WARP (Xray)";
         ClientSize = new Size(850, 710); MinimumSize = new Size(780, 690); StartPosition = FormStartPosition.CenterParent;
         Font = new Font("Segoe UI", 9);
@@ -117,7 +120,7 @@ internal sealed class FormGeoHideXray : Form
             await action(cts.Token);
         }
         catch (OperationCanceledException) { Log("Cancelled or operation deadline reached."); await StopAsync(); }
-        catch (Exception ex) { Log("Operation stopped: " + ex.Message); await StopAsync(); }
+        catch (Exception ex) { Log("Operation stopped: " + ex.Message); await StopAsync(); status.Text = ex.Message; }
         finally {
             operation = null; SetControls();
             if (closeRequested) { await StopAsync(); mayClose = true; Close(); }
@@ -134,17 +137,19 @@ internal sealed class FormGeoHideXray : Form
         string[] candidates = Endpoints(); var options = Options(); var accounts = await PrepareAsync(ct);
         results.Rows.Clear(); status.Text = "Scanning real tunnels; system routes are unchanged.";
         Log($"Scan: {(options.DoubleTunnel ? "two" : "one")} tunnel(s), noise={options.Noise}, {candidates.Length} endpoints.");
-        int? bestRow = null; int bestLatency = int.MaxValue;
+        int? bestRow = null; XrayWarpProbeResult? bestProbe = null;
+        int iranExits = 0;
         foreach (string endpoint in candidates) {
             ct.ThrowIfCancellationRequested();
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromSeconds(22));
             try {
                 await using var candidate = await XrayWarpSession.StartAsync(root, tools, accounts, endpoint, options, deadline.Token);
                 var probe = await candidate.ProbeAsync(deadline.Token);
-                bool eligible = probe.TunnelOk && probe.UdpOk && (!strict.Checked || probe.Exit.IsOutside("IR"));
+                bool eligible = probe.IsEligible(strict.Checked);
+                if (probe.HasIranExit) iranExits++;
                 int row = results.Rows.Add(endpoint, probe.LatencyMs, probe.UdpOk ? "Pass" : "Unverified",
-                    probe.Exit.IPv4.Country ?? "?", probe.Exit.IPv6.Country ?? "?", eligible ? "Candidate" : "Not verified");
-                if (eligible && probe.LatencyMs < bestLatency) { bestRow = row; bestLatency = probe.LatencyMs; }
+                    probe.Exit.IPv4.Country ?? "?", probe.Exit.IPv6.Country ?? "?", probe.SelectionStatus(strict.Checked));
+                if (eligible && probe.IsPreferredTo(bestProbe)) { bestRow = row; bestProbe = probe; }
                 Log(endpoint + " — " + probe.Summary);
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested) { results.Rows.Add(endpoint, "—", "?", "?", "?", "Timeout"); Log(endpoint + " — timed out."); }
@@ -152,7 +157,11 @@ internal sealed class FormGeoHideXray : Form
         }
         results.ClearSelection();
         if (bestRow.HasValue) { results.Rows[bestRow.Value].Selected = true; results.CurrentCell = results.Rows[bestRow.Value].Cells[0]; }
-        status.Text = bestRow.HasValue ? "Scan complete. Best verified candidate selected; Connect tests it again." : "No qualifying tunnel found. Try another noise setting or endpoint list.";
+        status.Text = bestProbe != null
+            ? (bestProbe.Exit.IsOutside("IR") ? "Verified outside-Iran candidate selected; Connect tests it again."
+                : "Connectivity only: exit is IR or unverified. Location restriction is not resolved.")
+            : iranExits > 0 ? "Working WARP exits still report IR. No verified outside-Iran exit found."
+                : "No qualifying tunnel found. Try another noise setting or endpoint list.";
         Log(status.Text);
     }
     private async Task ConnectAsync(CancellationToken ct) {
@@ -170,8 +179,8 @@ internal sealed class FormGeoHideXray : Form
         activeStrict = strict.Checked;
         if (activeStrict && !(await WarpExitCheck.FetchAsync(ct)).IsOutside("IR"))
             throw new InvalidOperationException("System-route country requirement failed after adapter startup.");
-        status.Text = "Connected through Advanced WARP. TCP + UDP routed; game/service access not verified.";
-        Log(status.Text); Log("Closing this window disconnects. No persistent kill switch; ordinary traffic resumes after disconnect.");
+        status.Text = ConnectionStatus(probe);
+        Log(status.Text); Log("Changing main-app pages keeps the tunnel connected; tray Exit disconnects. No persistent kill switch; ordinary traffic resumes after disconnect.");
         health.Start();
     }
     private async Task CheckSessionAsync(CancellationToken ct) {
@@ -182,8 +191,12 @@ internal sealed class FormGeoHideXray : Form
             throw new InvalidOperationException("Tunnel or country verification was lost; disconnecting.");
         if (activeStrict && !(await WarpExitCheck.FetchAsync(ct)).IsOutside("IR"))
             throw new InvalidOperationException("System-route country verification was lost; disconnecting.");
-        status.Text = "Tunnel verified; " + (probe.UdpOk ? "UDP probe passed." : "UDP probe currently unverified.");
+        status.Text = ConnectionStatus(probe);
     }
+    private static string ConnectionStatus(XrayWarpProbeResult probe) =>
+        $"Connected: IPv4 {probe.Exit.IPv4.Country ?? "unknown"}, IPv6 {probe.Exit.IPv6.Country ?? "unknown"}. " +
+        (probe.HasIranExit ? "IR location restriction is not resolved." : "Service access is not verified.");
+
     private async Task StopAsync() {
         health.Stop();
         if (session != null) {

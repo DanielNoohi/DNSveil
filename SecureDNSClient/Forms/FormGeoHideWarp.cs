@@ -44,21 +44,26 @@ public class FormGeoHideWarp : Form
     private string? _activeEndpoint;
     private string _activeProtocol = "MASQUE";
     private WarpCli.CensorshipOptions? _lastOpt;
+    private FormGeoHideXray? _advanced;
+    private bool _closingAdvanced;
     private bool _busy;
     private bool _reloadingEndpoints;
     private string _lastHealthSummary = "Health: idle";
 
-    public FormGeoHideWarp()
+    public FormGeoHideWarp() : this(true) { }
+
+    internal FormGeoHideWarp(bool runStartupChecks)
     {
+        Name = nameof(FormGeoHideWarp);
         Text = "DNSveil GeoHide";
-        ClientSize = new Size(720, 560);
+        ClientSize = new Size(900, 790);
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = true;
         MinimizeBox = true;
         ShowInTaskbar = true;
         ShowIcon = true;
-        MinimumSize = new Size(680, 500);
+        MinimumSize = new Size(850, 760);
         Font = new Font("Segoe UI", 9F);
 
         BuildLayout();
@@ -70,14 +75,30 @@ public class FormGeoHideWarp : Form
 
         Shown += async (_, _) =>
         {
+            if (!runStartupChecks) return;
             using var operation = BeginOperation();
             try { await RunStartupPreflightAsync(operation.Token).ConfigureAwait(true); }
             catch (OperationCanceledException) { Log("Startup check cancelled."); }
             catch (Exception ex) { Log("Startup check failed: " + ex.Message); }
             finally { EndOperation(operation); }
         };
-        FormClosing += (_, e) =>
+        FormClosing += async (_, e) =>
         {
+            if (_advanced is { IsDisposed: false })
+            {
+                e.Cancel = true;
+                if (_closingAdvanced) return;
+                _closingAdvanced = true;
+                var closed = new TaskCompletionSource<bool>();
+                _advanced.FormClosed += (_, _) => closed.TrySetResult(true);
+                _advanced.Close();
+                await closed.Task;
+                _advanced.Dispose();
+                _advanced = null;
+                _closingAdvanced = false;
+                BeginInvoke(new Action(Close));
+                return;
+            }
             // Keep the window alive until cancellation and network cleanup finish.
             // Reopening it cannot start another operation while the old one is exiting.
             e.Cancel = _busy;
@@ -92,6 +113,15 @@ public class FormGeoHideWarp : Form
                 _lifetime.Dispose();
             }
         };
+    }
+
+    internal Task CloseViewAsync()
+    {
+        if (IsDisposed) return Task.CompletedTask;
+        var closed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        FormClosed += (_, _) => closed.TrySetResult(true);
+        Close();
+        return closed.Task;
     }
 
     private void BuildLayout()
@@ -230,7 +260,7 @@ public class FormGeoHideWarp : Form
             Log("Cancellation requested — finishing cleanup…");
             try { _cts?.Cancel(); } catch { }
         };
-        _btnMinimize.Click += (_, _) => { WindowState = FormWindowState.Minimized; };
+        _btnMinimize.Click += (_, _) => { var main = TopLevelControl as Form; if (main != null) main.WindowState = FormWindowState.Minimized; };
         _btnInstall.Click += (_, _) => OpenLinks.OpenUrl("https://one.one.one.one/");
         _btnHelp.Click += (_, _) => CustomMessageBox.Show(this, GeoHidePresets.HelpSummary, "GeoHide help",
             MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -272,15 +302,7 @@ public class FormGeoHideWarp : Form
         _tips.SetToolTip(_chkRegionalExit, "Rejects working Iranian exits. Tries both tunnel protocols for up to 2 minutes. Uncheck for normal connectivity; this cannot select a country. Requires verified IPv4 and IPv6 countries outside IR. WARP may never provide one. Not a kill switch or guarantee of service access.");
         rowOpt.Controls.AddRange(new Control[] { _chkCensorship, _chkDpiAssist, _chkLowLatency, _chkRegionalExit });
 
-        var advanced = new Button { Text = "Advanced WARP (Xray)…", AutoSize = true };
-        advanced.Click += async (_, _) => {
-            if (_busy || _closing) return;
-            StopLinkWatch();
-            using var window = new FormGeoHideXray();
-            window.ShowDialog(this);
-            try { await RefreshStatusAsync(); } catch (Exception ex) { Log(ex.Message); }
-        };
-        rowOpt.Controls.Add(advanced);
+
 
         // ---- Log ----
         _log.Dock = DockStyle.Fill;
@@ -296,7 +318,36 @@ public class FormGeoHideWarp : Form
         root.Controls.Add(rowOpt, 0, 3);
         root.Controls.Add(_log, 0, 4);
 
-        Controls.Add(root);
+        var tabs = new TabControl { Dock = DockStyle.Fill, Name = "GeoHideConnectionTabs" };
+        var official = new TabPage("Official WARP");
+        var advanced = new TabPage("Advanced WARP");
+        official.Controls.Add(root);
+        tabs.TabPages.AddRange(new[] { official, advanced });
+        tabs.Selecting += (_, e) => {
+            // Prevent switching engines while a connection operation is running.
+            if (_busy || _closing || _closingAdvanced) e.Cancel = true;
+            if (e.TabPage == official && _advanced?.HasActiveWork == true) e.Cancel = true;
+        };
+        tabs.SelectedIndexChanged += async (_, _) => {
+            if (tabs.SelectedTab == advanced)
+            {
+                StopLinkWatch();
+                if (_advanced == null)
+                {
+                    _advanced = new FormGeoHideXray {
+                        TopLevel = false, FormBorderStyle = FormBorderStyle.None,
+                        Dock = DockStyle.Fill, ShowInTaskbar = false
+                    };
+                    advanced.Controls.Add(_advanced);
+                    _advanced.Show();
+                }
+            }
+            else
+            {
+                try { await RefreshStatusAsync(); } catch (Exception ex) { Log(ex.Message); }
+            }
+        };
+        Controls.Add(tabs);
     }
 
     private void ApplyHeaderStyle()

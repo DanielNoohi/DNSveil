@@ -477,6 +477,7 @@ public partial class FormMain
     {
         if (IsExiting) return;
         IsExiting = true;
+        if (_geoHideView != null) await _geoHideView.CloseViewAsync();
 
         // Write Closing message to log
         string msg = "Exiting...";

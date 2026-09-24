@@ -5,21 +5,21 @@ This optional backend uses Xray for WARP / WARP-on-WARP and sing-box for this PC
 ## First connection
 
 1. Extract the complete portable x64 release and run SecureDNSClientPortable.exe as Administrator.
-2. Disconnect the official WARP tunnel and other VPNs. Open Tools → GeoHide WARP → Advanced WARP (Xray).
+2. Disconnect the official WARP tunnel and other VPNs. Open Tools → GeoHide WARP and select Advanced WARP inside the main DNSveil window.
 3. Read Cloudflare's terms using the link. If you accept, tick the checkbox to allow creation of two WARP profiles. Existing profiles are reused.
 4. Start with WARP-on-WARP and Warp Pro noise enabled. The default endpoint list and noise values are starting points, not known-working settings for your ISP.
 5. Click Scan endpoints. It tests actual HTTPS traffic and a UDP DNS response through each candidate. Scanning does not install PC routes. Up to 16 custom IP:port endpoints are accepted; bracket IPv6 addresses.
-6. Inspect the HTTPS, UDP and country columns. The fastest candidate meeting the current requirements is selected. Click Connect this PC to verify it again and then activate the adapter.
-7. Test the game or service. Keep the Advanced WARP window open; minimizing it is fine. Disconnect or close that window to stop its owned tunnel.
+6. Inspect the HTTPS, UDP and country columns. Verified outside-Iran candidates are preferred, then ranked by latency. Click Connect this PC to verify it again and then activate the adapter.
+7. Test the game or service. Changing main-app pages or minimizing DNSveil keeps the tunnel running. Disconnect in Advanced WARP or use tray → Exit to stop it. Switching to Official WARP is disabled while Advanced WARP is busy or connected.
 
 If no candidate works, try single WARP to distinguish outer-tunnel connectivity from WARP-on-WARP failure, or adjust noise values and scan again. Noise must be 1–10 packets of 1–1280 bytes with 0–100 ms delays. No setting guarantees connectivity.
 
 ## Reading results
 
-- Candidate means WARP was verified over HTTPS and a matching UDP DNS response was received. It is not proof that a game login, gameplay or Spotify playback will work.
+- Outside IR verified means both country checks, HTTPS WARP and a matching UDP DNS response passed. IR — location unchanged means connectivity works but the country requirement failed. It is not proof that a game login, gameplay or Spotify playback will work.
 - HTTPS latency is one trace request measured during this scan, not a full game latency benchmark.
 - Country comes from separate IPv4/IPv6 Cloudflare trace observations. A data-center location is not the exit country. Unknown remains unknown.
-- Require both exit countries outside Iran is off by default. If enabled, Iranian or unverified exits are rejected, including after PC routing starts and during health checks. This may prevent any connection.
+- Require both exit countries outside Iran is on by default. While enabled, Iranian or unverified exits are rejected, including after PC routing starts and during health checks. This may prevent any connection.
 - Test tunnel rechecks the active tunnel. Automatic health checks run while connected; a failed tunnel or strict country check triggers cleanup rather than silently switching to another mode.
 
 ## Routing and privacy

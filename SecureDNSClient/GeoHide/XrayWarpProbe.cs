@@ -8,6 +8,13 @@ namespace SecureDNSClient.GeoHide;
 
 internal sealed record XrayWarpProbeResult(WarpExitCheck.Report Exit, int LatencyMs, bool UdpOk)
 {
+    internal bool HasIranExit => Exit.IPv4.Country == "IR" || Exit.IPv6.Country == "IR";
+    internal bool IsEligible(bool requireOutsideIran) => TunnelOk && UdpOk && (!requireOutsideIran || Exit.IsOutside("IR"));
+    internal bool IsPreferredTo(XrayWarpProbeResult? other) => other == null ||
+        (Exit.IsOutside("IR") != other.Exit.IsOutside("IR") ? Exit.IsOutside("IR") : LatencyMs < other.LatencyMs);
+    internal string SelectionStatus(bool requireOutsideIran) => !TunnelOk || !UdpOk ? "Tunnel unverified" :
+        Exit.IsOutside("IR") ? "Outside IR verified" : HasIranExit ? "IR — location unchanged" :
+        requireOutsideIran ? "Country unverified — rejected" : "Country unverified";
     internal bool TunnelOk => (Exit.IPv4.WarpOn == true || Exit.IPv6.WarpOn == true) &&
         Exit.IPv4.WarpOn != false && Exit.IPv6.WarpOn != false;
     internal string Summary => $"HTTPS {LatencyMs} ms; UDP DNS {(UdpOk ? "passed" : "not verified")}. {Exit.Summary}";

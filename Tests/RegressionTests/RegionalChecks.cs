@@ -24,6 +24,13 @@ internal static class RegionalChecks
         check(!new WarpExitCheck.Report(V4("DE"), new("IPv6", null, null, null, "timeout")).IsOutside("IR"),
             "Unavailable IPv6 cannot be silently treated as safe");
 
+        var fastIran = new XrayWarpProbeResult(iran, 50, true);
+        var slowerGermany = new XrayWarpProbeResult(germany, 500, true);
+        check(!fastIran.IsEligible(true) && fastIran.IsEligible(false), "Iran exit is rejected under strict mode but available for explicit connectivity-only use");
+        check(slowerGermany.IsPreferredTo(fastIran) && !fastIran.IsPreferredTo(slowerGermany), "Verified outside-Iran exit outranks a faster Iranian exit");
+        check(!new XrayWarpProbeResult(new(missing, V6("DE")), 20, true).IsEligible(true), "Unknown country cannot qualify as outside Iran");
+        check(fastIran.SelectionStatus(false).Contains("IR"), "Connectivity-only Iranian result is explicitly labeled");
+
         int attempts = 0, cleanups = 0;
         var result = await WarpRegionalSearch.RunAsync((i, _) =>
         {

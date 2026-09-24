@@ -9,7 +9,7 @@
 
 A hardened fork of [msasanmh/DNSveil](https://github.com/msasanmh/DNSveil) (Secure DNS Client) with **GeoHide WARP**, Iran-aware connect paths, and production-minded reliability work.
 
-**Latest:** [v4.0.0](https://github.com/DanielNoohi/DNSveil/releases/latest) · [Download portable x64](https://github.com/DanielNoohi/DNSveil/releases/latest)
+**Latest:** [v4.0.1](https://github.com/DanielNoohi/DNSveil/releases/latest) · [Download portable x64](https://github.com/DanielNoohi/DNSveil/releases/latest)
 
 ---
 
@@ -146,11 +146,13 @@ GeoHide does **not** ship Shecan / gaming Smart DNS / upstream-proxy presets any
 
 ---
 
-## What's new in v4.0.0
+## What's new in v4.0.1
 
-**Advanced WARP (Xray)** is a new optional backend inspired by BPB Worker Panel and BPB Warp Scanner. It supports single WARP, two-account WARP-on-WARP, configurable UDP noise, and real endpoint tests. The existing official WARP Auto/MASQUE/WireGuard mode remains available.
+**GeoHide stays inside the main app**, with Official and Advanced WARP tabs. Iranian exits are clearly labeled and verified non-IR candidates are preferred.
 
-Open **Tools → GeoHide WARP → Advanced WARP (Xray)**. After accepting Cloudflare's terms for profile creation, scan endpoints and choose **Connect this PC**. Scans do not change routes; connection enables a TCP/UDP adapter only after WARP HTTPS and a matching UDP response pass. Country checks remain separate and optional. Read the [complete setup guide](ADVANCED_WARP.md) before your first trial.
+**Advanced WARP (Xray)** is an optional backend inspired by BPB Worker Panel and BPB Warp Scanner. It supports single WARP, two-account WARP-on-WARP, configurable UDP noise, and real endpoint tests. The existing official WARP Auto/MASQUE/WireGuard mode remains available.
+
+Open **Tools → GeoHide WARP**, then choose **Advanced WARP** inside the main DNSveil window. After accepting Cloudflare's terms for profile creation, scan endpoints and choose **Connect this PC**. Scans do not change routes; connection enables a TCP/UDP adapter only after WARP HTTPS and a matching UDP response pass. Advanced WARP requires verified outside-Iran exits by default; turn this off only for connectivity without a country-change requirement. Read the [complete setup guide](ADVANCED_WARP.md) before your first trial.
 
 The portable x64 release includes checksum-pinned Xray, sing-box and signed Wintun components. Profiles are encrypted with Windows DPAPI; runtime configurations use restricted directories. Owned backend processes are stopped on disconnect/window close and tied to DNSveil's process lifetime.
 
@@ -164,6 +166,7 @@ Recent work focuses on GeoHide reliability under censorship:
 
 | Version | Focus |
 |---------|--------|
+| **4.0.1** | Embedded GeoHide, shared connection tabs, explicit IR results and strict regional default |
 | **4.0.0** | Optional Xray/WARP-on-WARP backend, configurable noise, real HTTPS/UDP scanning, PC routing, protected profiles and 69 checks |
 | **3.9.0** | Auto protocol recovery, bounded real WireGuard handshakes, read-only connection reports, clearer strict country option and 44 checks |
 | **3.8.0** | Experimental bounded exit-country search, separate IPv4/IPv6 verification, truthful country status and 32 regression checks |

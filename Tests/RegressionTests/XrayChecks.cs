@@ -21,6 +21,35 @@ internal static class XrayChecks
                 using var bitmap = new System.Drawing.Bitmap(form.Width, form.Height);
                 form.DrawToBitmap(bitmap, new System.Drawing.Rectangle(0, 0, form.Width, form.Height));
                 bitmap.Save(Path.Combine(AppContext.BaseDirectory, "advanced-warp-ui.png"));
+                using var host = new System.Windows.Forms.Form {
+                    ShowInTaskbar = false, StartPosition = System.Windows.Forms.FormStartPosition.Manual,
+                    Location = new System.Drawing.Point(-30000, -30000), ClientSize = new System.Drawing.Size(920, 800)
+                };
+                using var geo = new SecureDNSClient.FormGeoHideWarp(false) {
+                    TopLevel = false, FormBorderStyle = System.Windows.Forms.FormBorderStyle.None,
+                    ShowInTaskbar = false, Dock = System.Windows.Forms.DockStyle.Fill
+                };
+                host.Controls.Add(geo);
+                host.Show(); geo.Show();
+                var tabs = geo.Controls.OfType<System.Windows.Forms.TabControl>().Single();
+                tabs.SelectedIndex = 1;
+                System.Windows.Forms.Application.DoEvents();
+                var advanced = tabs.TabPages[1].Controls.OfType<SecureDNSClient.FormGeoHideXray>().Single();
+                if (geo.TopLevel || advanced.TopLevel || advanced.ShowInTaskbar || advanced.FindForm() != advanced)
+                    throw new Exception("GeoHide must keep both connection views embedded.");
+                if (advanced.Parent != tabs.TabPages[1]) throw new Exception("Advanced view is not hosted in its tab.");
+                using var combined = new System.Drawing.Bitmap(host.Width, host.Height);
+                host.DrawToBitmap(combined, new System.Drawing.Rectangle(0, 0, host.Width, host.Height));
+                combined.Save(Path.Combine(AppContext.BaseDirectory, "geohide-embedded-ui.png"));
+                var close = geo.CloseViewAsync();
+                var until = DateTime.UtcNow.AddSeconds(3);
+                while (!close.IsCompleted && DateTime.UtcNow < until) {
+                    System.Windows.Forms.Application.DoEvents();
+                    Thread.Sleep(10);
+                }
+                if (!close.IsCompletedSuccessfully || !advanced.IsDisposed)
+                    throw new Exception("Embedded GeoHide did not close its advanced view.");
+                host.Close();
             } catch (Exception ex) { uiError = ex; }
         });
         uiThread.SetApartmentState(ApartmentState.STA); uiThread.Start();
