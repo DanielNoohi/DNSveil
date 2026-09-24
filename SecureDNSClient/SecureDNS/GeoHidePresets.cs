@@ -43,7 +43,9 @@ public static class GeoHidePresets
     }
 
     public static string HelpSummary =>
-        "GeoHide uses the official Cloudflare WARP client.\n\n" +
+        "GeoHide offers official WARP and Advanced WARP (Xray).\n\n" +
+        "• Advanced WARP adds two-tunnel WARP, noise, real scanning and TCP/UDP PC routing.\n" +
+        "  Read ADVANCED_WARP.md. Close the advanced window to disconnect its tunnel.\n" +
         "• Auto tries MASQUE first and WireGuard if needed.\n" +
         "• WireGuard uses bounded real handshakes on distinct endpoints; UDP may still be blocked.\n" +
         "• Test connection checks WARP, IPv4/IPv6 countries and public web responses without reconnecting.\n" +

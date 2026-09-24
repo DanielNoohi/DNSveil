@@ -9,7 +9,7 @@
 
 A hardened fork of [msasanmh/DNSveil](https://github.com/msasanmh/DNSveil) (Secure DNS Client) with **GeoHide WARP**, Iran-aware connect paths, and production-minded reliability work.
 
-**Latest:** [v3.9.0](https://github.com/DanielNoohi/DNSveil/releases/latest) · [Download portable x64](https://github.com/DanielNoohi/DNSveil/releases/latest)
+**Latest:** [v4.0.0](https://github.com/DanielNoohi/DNSveil/releases/latest) · [Download portable x64](https://github.com/DanielNoohi/DNSveil/releases/latest)
 
 ---
 
@@ -63,7 +63,9 @@ More versions: [Microsoft .NET 6 downloads](https://dotnet.microsoft.com/en-us/d
 
 ### 3. GeoHide (exit IP)
 
-When DNS alone is not enough:
+Choose either **Advanced WARP (Xray)** using the [v4 guide](ADVANCED_WARP.md), or the existing official client below. Run one tunnel at a time.
+
+For the official client:
 
 1. Install [Cloudflare WARP](https://one.one.one.one/) (includes `warp-cli`)
 2. Open **Tools → GeoHide WARP**
@@ -144,19 +146,17 @@ GeoHide does **not** ship Shecan / gaming Smart DNS / upstream-proxy presets any
 
 ---
 
-## What's new in v3.9.0
+## What's new in v4.0.0
 
-**Connection recovery and diagnostics:** GeoHide now defaults to **Auto**, which tries MASQUE first and falls back to WireGuard only if needed. Each protocol has a 100-second work budget plus cleanup. Successful connections are kept, and automatic recovery remains enabled during health monitoring.
+**Advanced WARP (Xray)** is a new optional backend inspired by BPB Worker Panel and BPB Warp Scanner. It supports single WARP, two-account WARP-on-WARP, configurable UDP noise, and real endpoint tests. The existing official WARP Auto/MASQUE/WireGuard mode remains available.
 
-WireGuard now performs up to four distinct real handshake attempts (22 seconds of work each, plus cleanup), including alternate UDP ports. It no longer repeats the same default endpoint or presents a local UDP send as remote reachability or latency. An explicitly supplied WireGuard endpoint is respected. Cancel stops recovery; failed cleanup prevents another attempt.
+Open **Tools → GeoHide WARP → Advanced WARP (Xray)**. After accepting Cloudflare's terms for profile creation, scan endpoints and choose **Connect this PC**. Scans do not change routes; connection enables a TCP/UDP adapter only after WARP HTTPS and a matching UDP response pass. Country checks remain separate and optional. Read the [complete setup guide](ADVANCED_WARP.md) before your first trial.
 
-**Test connection** checks current WARP status, separate IPv4/IPv6 exit countries, and public HTTP responses from Spotify, ChatGPT and YouTube without connecting or disconnecting. Reports are saved under `UserData/GeoHideLogs`. These public-page checks do not test authenticated app use, music playback or Where Winds Meet gameplay; HTTP 403 alone is not proof of a country block.
+The portable x64 release includes checksum-pinned Xray, sing-box and signed Wintun components. Profiles are encrypted with Windows DPAPI; runtime configurations use restricted directories. Owned backend processes are stopped on disconnect/window close and tied to DNSveil's process lifetime.
 
-The former experimental checkbox is now **Require exit outside Iran (strict; may not connect)**. Logs confirmed that the earlier version rejected working MASQUE tunnels because their exits still reported Iran. The option remains off by default and still requires both IP families to be verified outside Iran. For normal WARP connectivity, leave it off and choose Auto. Working endpoints are no longer penalized in the connectivity cache merely because their exit country is Iranian.
+**No live country change, full-device routing success on the affected network, or game/service access is claimed.** WARP-on-WARP is an experiment, and Cloudflare controls exit assignment. This is not a persistent kill switch. Country observations do not prove Spotify, ChatGPT or Where Winds Meet acceptance.
 
-Cloudflare controls exit assignment. A Frankfurt data center does not establish a German exit. **This update has not demonstrated a working WireGuard connection or a country change on the affected network.** It cannot guarantee acceptance by games or streaming services. The strict option is not a kill switch; ordinary traffic remains possible after failure and between checks. See [Cloudflare's limitations](https://developers.cloudflare.com/warp-client/known-issues-and-faq/).
-
-The suite has 44 isolated regression checks covering recovery, cancellation and diagnostics. See [test instructions](Tests/RegressionTests/README.md) and [release notes](RELEASE_NOTES.md). Existing .NET 6 / dependency warnings remain.
+The 69 checks include validation by the actual pinned cores, real authenticated TCP/UDP forwarding through local fixtures, encrypted profile reuse, and process cleanup. No Cloudflare accounts are created and no system routes are installed by these tests. See [test instructions](Tests/RegressionTests/README.md), [release notes](RELEASE_NOTES.md), and [third-party notices](THIRD_PARTY_BACKENDS.md). Existing .NET 6/dependency warnings remain.
 
 ## Changelog (this fork)
 
@@ -164,6 +164,7 @@ Recent work focuses on GeoHide reliability under censorship:
 
 | Version | Focus |
 |---------|--------|
+| **4.0.0** | Optional Xray/WARP-on-WARP backend, configurable noise, real HTTPS/UDP scanning, PC routing, protected profiles and 69 checks |
 | **3.9.0** | Auto protocol recovery, bounded real WireGuard handshakes, read-only connection reports, clearer strict country option and 44 checks |
 | **3.8.0** | Experimental bounded exit-country search, separate IPv4/IPv6 verification, truthful country status and 32 regression checks |
 | **3.7.0** | Responsive WARP operations, cancellation across recovery and preflight, bounded IP checks, 19 regression checks and Windows CI |

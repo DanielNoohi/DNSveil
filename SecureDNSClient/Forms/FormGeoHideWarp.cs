@@ -106,7 +106,7 @@ public class FormGeoHideWarp : Form
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 108)); // header
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));  // endpoint row
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));  // actions
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 106));  // options
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 142));  // options
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // log
 
         // ---- Header status strip ----
@@ -271,6 +271,16 @@ public class FormGeoHideWarp : Form
         _chkRegionalExit.Text = "Require exit outside Iran (strict; may not connect)";
         _tips.SetToolTip(_chkRegionalExit, "Rejects working Iranian exits. Tries both tunnel protocols for up to 2 minutes. Uncheck for normal connectivity; this cannot select a country. Requires verified IPv4 and IPv6 countries outside IR. WARP may never provide one. Not a kill switch or guarantee of service access.");
         rowOpt.Controls.AddRange(new Control[] { _chkCensorship, _chkDpiAssist, _chkLowLatency, _chkRegionalExit });
+
+        var advanced = new Button { Text = "Advanced WARP (Xray)…", AutoSize = true };
+        advanced.Click += async (_, _) => {
+            if (_busy || _closing) return;
+            StopLinkWatch();
+            using var window = new FormGeoHideXray();
+            window.ShowDialog(this);
+            try { await RefreshStatusAsync(); } catch (Exception ex) { Log(ex.Message); }
+        };
+        rowOpt.Controls.Add(advanced);
 
         // ---- Log ----
         _log.Dock = DockStyle.Fill;

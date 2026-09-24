@@ -17,6 +17,9 @@ jobs:
           dotnet-version: |
             8.0.x
             6.0.x
+      - name: Restore verified optional backends
+        shell: pwsh
+        run: ./Scripts/Restore-XrayBackends.ps1
       - name: Build and run isolated regression checks
         run: dotnet run --project Tests/RegressionTests/RegressionTests.csproj --configuration Release
       - name: Build portable launcher

@@ -1,3 +1,5 @@
+> DNSveil v4 also offers **Advanced WARP (Xray)** with WARP-on-WARP, noise and real tunnel scanning. See [the v4 guide](../../ADVANCED_WARP.md). The instructions below cover the existing official-client mode.
+
 # Cloudflare WARP GeoHide (via DNSveil)
 
 ## Approach (from PyWarp + Iran DPI research)

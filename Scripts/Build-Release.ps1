@@ -17,6 +17,7 @@ try {
     }
     $sevenZip = Join-Path $env:ProgramFiles '7-Zip/7z.exe'
     if (-not (Test-Path -LiteralPath $sevenZip)) { throw 'Install 7-Zip before packaging.' }
+    & (Join-Path $PSScriptRoot "Restore-XrayBackends.ps1") -IncludeSources
     dotnet run --project Tests/RegressionTests/RegressionTests.csproj --configuration Release
     if ($LASTEXITCODE -ne 0) { throw 'Regression checks failed.' }
     $portableRoot = Join-Path $releaseRoot 'SecureDNSClientPortable'
@@ -28,14 +29,21 @@ try {
         $actual = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $portableRoot $binary)).ProductVersion
         if ($actual.Split('+')[0] -ne $version) { throw "Version mismatch: $binary has $actual instead of $version" }
     }
-    Copy-Item -LiteralPath README.md, RELEASE_NOTES.md, LICENSE, CheckDotNet.bat -Destination $portableRoot
+    Copy-Item -LiteralPath README.md, RELEASE_NOTES.md, ADVANCED_WARP.md, THIRD_PARTY_BACKENDS.md, LICENSE, CheckDotNet.bat -Destination $portableRoot
     $archiveName = "SecureDNSClientPortable_v${version}_x64.7z"
     $archivePath = Join-Path $releaseRoot $archiveName
     & $sevenZip a -t7z -mx=5 $archivePath $portableRoot
     if ($LASTEXITCODE -ne 0) { throw 'Archive creation failed.' }
     & $sevenZip t $archivePath
     if ($LASTEXITCODE -ne 0) { throw 'Archive integrity check failed.' }
-    $hash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
-    "$hash  $archiveName" | Set-Content -LiteralPath (Join-Path $releaseRoot 'SHA256SUMS.txt') -Encoding ascii
+    $sourceNames = @('Xray-core-v26.3.27-source.tar.gz', 'sing-box-v1.14.1-source.tar.gz')
+    foreach ($sourceName in $sourceNames) {
+        Copy-Item -LiteralPath (Join-Path $repoRoot "artifacts/bin/backend-tools/$sourceName") -Destination $releaseRoot
+    }
+    $checksums = foreach ($name in @($archiveName) + $sourceNames) {
+        $hash = (Get-FileHash -LiteralPath (Join-Path $releaseRoot $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$hash  $name"
+    }
+    $checksums | Set-Content -LiteralPath (Join-Path $releaseRoot 'SHA256SUMS.txt') -Encoding ascii
     Write-Output "Verified release package: $archivePath"
 } finally { Pop-Location }
