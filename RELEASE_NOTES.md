@@ -1,26 +1,27 @@
-# DNSveil v3.8.0 — experimental exit-country search
+# DNSveil v3.9.0 — connection recovery and diagnostics
 
 ## What changed
 
-- Add an opt-in **Try exit outside Iran (experimental)** checkbox in GeoHide WARP.
-- Try the selected protocol, an alternate protocol, and another candidate in at most three rounds within a two-minute search budget plus cleanup. Experiments run without DPI assist.
-- Verify direct IPv4 and IPv6 exits separately with normal HTTPS certificate validation. Accept only known non-IR country observations with WARP on for both families. Unknown or unavailable families do not pass.
-- Recheck the country requirement during health monitoring and request disconnection when it is no longer verified.
-- Clarify that exit country and Cloudflare data-center location are different. A connected tunnel is not evidence of unrestricted service access.
-- Add 13 regression checks for country evidence, mixed IP families, bounded search, acceptance and cancellation cleanup (32 checks total).
+- Auto is the default protocol choice: try MASQUE first, then WireGuard if necessary. Keep successful tunnels and retain Auto during health recovery. Each protocol has a 100-second work budget plus cleanup.
+- Replace repeated WireGuard default attempts with up to four distinct real handshakes, including UDP ports 500, 4500 and 1701. Each has a 22-second work budget plus cleanup. Explicit endpoints are preserved.
+- Remove fake WireGuard reachability/latency results based only on sending UDP. Candidates remain unverified until a real WARP handshake succeeds.
+- Finish failed-attempt cleanup before recovery. Cancellation never starts another protocol, and unconfirmed disconnect stops recovery.
+- Add Test connection: current WARP status, IPv4/IPv6 countries, and public-page responses from Spotify, ChatGPT and YouTube. It does not reconnect. Save reports under UserData/GeoHideLogs.
+- Rename the experimental option to Require exit outside Iran (strict; may not connect). Explain why a working Iranian exit is rejected, retain the strict requirement, and stop penalizing those working endpoints in the connectivity cache.
+- Update Help and add 12 regression checks (44 total).
 
-## How to use
+## Use
 
-Extract the portable archive, run `SecureDNSClientPortable.exe`, open Tools → GeoHide WARP, select **Try exit outside Iran (experimental)**, then Connect. Read the reported IPv4 and IPv6 countries. The option is off by default.
+Extract the portable archive and run SecureDNSClientPortable.exe. Open Tools → GeoHide WARP, choose Auto, and leave Require exit outside Iran unchecked for normal connectivity. Connect, then use Test connection for a saved diagnostic report.
 
-## Limits
+Enable the strict country option only if you want Iranian or unverified exits rejected. It may find no acceptable exit and disconnect. It is not a kill switch; ordinary traffic remains possible during attempts, after failure and between checks.
 
-Cloudflare controls exit assignment. No successful change of country has been demonstrated on the affected network. This may find no qualifying exit. A different observed country does not guarantee Spotify playback, ChatGPT login, or Where Winds Meet access, and Cloudflare's location data may differ from a service's data.
+## Validation and limits
 
-This is not a kill switch. Normal Internet traffic remains possible during attempts, after failure, and between checks. The app does not change GPS permissions, account regions, or supply another VPN/server. A missing IPv6 observation causes rejection even if that route might simply be unavailable.
+The affected network's logs show working MASQUE tunnels with Iranian exits and stalled WireGuard handshakes. Regression validation uses local fixtures and simulated recovery; no working WireGuard connection or country change has been demonstrated on this network by this release. Public-page responses do not verify login, Spotify playback or Where Winds Meet gameplay. A 403 response alone does not establish a regional block.
 
-Validation uses simulated connections and local fixtures; no live region-unblocking claim is made. Existing .NET 6 / dependency warnings remain.
+Cloudflare controls exit assignment; a Frankfurt data center is not proof of a German exit. DNSveil cannot guarantee another country or service acceptance. Existing .NET 6/dependency warnings remain. Requires Windows x64, .NET Desktop 6 and ASP.NET Core 6 runtimes; administrator privileges are required for DPI/adapter operations.
 
-## Download
+## Downloads
 
-`SecureDNSClientPortable_v3.8.0_x64.7z` and `SHA256SUMS.txt`. Requires Windows x64, .NET Desktop 6 and ASP.NET Core 6 runtimes. Administrator privileges are needed for DPI / WinDivert and related adapter operations.
+SecureDNSClientPortable_v3.9.0_x64.7z and SHA256SUMS.txt.

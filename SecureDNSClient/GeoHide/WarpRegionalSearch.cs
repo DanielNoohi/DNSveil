@@ -41,6 +41,7 @@ internal static class WarpRegionalSearch
                     }
                     progress?.Report("Exit not accepted: original country, WARP off, or an unverified IP family. Trying another route.");
                 }
+                else last = current.Message;
                 await cleanup(current).ConfigureAwait(false);
                 needsCleanup = false;
                 current = null;

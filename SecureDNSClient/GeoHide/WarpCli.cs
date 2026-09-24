@@ -110,6 +110,8 @@ public static class WarpCli
         public bool RequireLinkQuality { get; init; } = true;
         /// <summary>Experimental: try both protocols, accepting only verified IPv4/IPv6 exits outside IR.</summary>
         public bool TryExitOutsideIran { get; init; } = false;
+        /// <summary>Retain automatic protocol recovery during health-watch reconnects.</summary>
+        public bool AutomaticProtocol { get; init; } = false;
     }
 
     /// <summary>Last probed connect queue — used by health watch to rotate without a full rescan.</summary>
@@ -772,13 +774,65 @@ public static class WarpCli
 
     public static async Task<(bool Ok, string Message, string? Endpoint, string Protocol)> TryConnectWithFallbackAsync(
         IEnumerable<string>? endpoints,
-        string preferredProtocol = "WireGuard",
+        string preferredProtocol = "Auto",
         IProgress<string>? progress = null,
         CancellationToken ct = default,
         CensorshipOptions? censorship = null)
         => await RunOperationAsync(() => censorship?.TryExitOutsideIran == true
-            ? TryRegionalExitAsync(endpoints, preferredProtocol, progress, ct, censorship)
-            : TryConnectCoreAsync(endpoints, preferredProtocol, progress, ct, censorship), ct).ConfigureAwait(false);
+            ? TryRegionalExitAsync(endpoints, preferredProtocol == "Auto" ? "MASQUE" : preferredProtocol, progress, ct, censorship)
+            : preferredProtocol == "Auto"
+                ? TryAutomaticAsync(endpoints, progress, ct, censorship)
+                : TryConnectCoreAsync(endpoints, preferredProtocol, progress, ct, censorship), ct).ConfigureAwait(false);
+
+    private static async Task CleanupAttemptAsync()
+    {
+        Result disconnected = await RunCleanupAsync("disconnect").ConfigureAwait(false);
+        await WarpDpiAssist.StopAsync().ConfigureAwait(false);
+        if (!disconnected.Ok) throw new InvalidOperationException("Could not confirm disconnect; recovery stopped: " + disconnected.ErrorLine);
+    }
+
+    private static async Task<(bool Ok, string Message, string? Endpoint, string Protocol)> TryAutomaticAsync(
+        IEnumerable<string>? endpoints, IProgress<string>? progress, CancellationToken ct, CensorshipOptions? opt)
+    {
+        var requested = endpoints?.ToArray();
+        var result = await WarpConnectionRecovery.RunAsync(new[] {
+            new WarpConnectionRecovery.Attempt("MASQUE", null), new WarpConnectionRecovery.Attempt("WireGuard", null) },
+            async (attempt, token) =>
+            {
+                // Endpoint ports are protocol-specific. Do not reuse a MASQUE :443 override for WireGuard.
+                var r = await RunOperationAsync(() => TryConnectCoreAsync(
+                    attempt.Protocol == "MASQUE" ? requested : null, attempt.Protocol, progress, token,
+                    (opt ?? new CensorshipOptions()) with { MaxConnectAttempts = 4 }), token).ConfigureAwait(false);
+                return new WarpRegionalSearch.Connection(r.Ok, r.Message, r.Endpoint, r.Protocol);
+            }, CleanupAttemptAsync, progress, ct, TimeSpan.FromSeconds(100)).ConfigureAwait(false);
+        return (result.Ok, result.Message, result.Endpoint, result.Protocol);
+    }
+
+    private static async Task<(bool Ok, string Message, string? Endpoint, string Protocol)> TryWireGuardEndpointsAsync(
+        IEnumerable<string>? endpoints, CensorshipOptions opt, IProgress<string>? progress, CancellationToken ct)
+    {
+        var result = await WarpConnectionRecovery.RunAsync(WarpConnectionRecovery.WireGuardPlan(endpoints, opt.MaxConnectAttempts),
+            (attempt, token) => RunOperationAsync(async () =>
+            {
+                await WaitUntilDisconnectedAsync(token).ConfigureAwait(false);
+                ApplyTunnelPrefs("WireGuard", null, progress);
+                string effective = ReadEffectiveProtocol();
+                if (!effective.Equals("WireGuard", StringComparison.OrdinalIgnoreCase))
+                    return new WarpRegionalSearch.Connection(false, "WireGuard protocol was not confirmed by WARP settings.", attempt.Endpoint, "WireGuard");
+                Result endpoint = attempt.Endpoint == null ? ResetEndpoint() : SetEndpoint(attempt.Endpoint);
+                WarpSessionLog.Cli("WireGuard endpoint " + (attempt.Endpoint ?? "reset"), endpoint, always: true);
+                if (!endpoint.Ok) return new WarpRegionalSearch.Connection(false, "WARP rejected endpoint: " + endpoint.ErrorLine, attempt.Endpoint, "WireGuard");
+                if (await PollConnectedAsync(progress, true, token, longPoll: true).ConfigureAwait(false) &&
+                    await StabilizeConnectedAsync(progress, token, soft: opt.Enabled).ConfigureAwait(false))
+                {
+                    var accepted = await QualifyOrRejectAsync(attempt.Endpoint, "WireGuard", opt, progress, token,
+                        WarpSessionLog.ElapsedMs, false).ConfigureAwait(false);
+                    if (accepted != null) return new WarpRegionalSearch.Connection(accepted.Value.Ok, accepted.Value.Message, accepted.Value.Endpoint, accepted.Value.Protocol);
+                }
+                return new WarpRegionalSearch.Connection(false, "WireGuard handshake or tunnel verification failed at " + (attempt.Endpoint ?? "default endpoint") + ".", attempt.Endpoint, "WireGuard");
+            }, token), CleanupAttemptAsync, progress, ct, TimeSpan.FromSeconds(22)).ConfigureAwait(false);
+        return (result.Ok, result.Ok ? result.Message : result.Message + " Try Auto or MASQUE; UDP may be filtered on this network.", result.Endpoint, result.Protocol);
+    }
 
     private static async Task<(bool Ok, string Message, string? Endpoint, string Protocol)> TryRegionalExitAsync(
         IEnumerable<string>? endpoints, string protocol, IProgress<string>? progress,
@@ -801,10 +855,8 @@ public static class WarpCli
             return new WarpRegionalSearch.Connection(connected.Ok, connected.Message, connected.Endpoint, connected.Protocol);
         }, WarpExitCheck.FetchAsync, async connection =>
         {
-            if (connection?.Endpoint != null) WarpSuccessCache.Demote(connection.Endpoint);
-            Result disconnected = await RunCleanupAsync("disconnect").ConfigureAwait(false);
-            if (!disconnected.Ok) progress?.Report("WARN: disconnect was not confirmed: " + disconnected.ErrorLine);
-            await WarpDpiAssist.StopAsync().ConfigureAwait(false);
+            // An Iranian exit is not evidence that a working endpoint has poor connectivity.
+            await CleanupAttemptAsync().ConfigureAwait(false);
         }, "IR", progress, ct).ConfigureAwait(false);
         return (result.Ok, result.Message, result.Endpoint, result.Protocol);
     }
@@ -895,6 +947,9 @@ public static class WarpCli
             progress?.Report("WARN mode warp: " + mode.ErrorLine);
         if (censorship.LowLatency)
             progress?.Report("Mode: warp + post-connect DPI stop (Iran excludes off by default)…");
+
+        if (!masquePath)
+            return await TryWireGuardEndpointsAsync(endpoints, censorship, progress, ct).ConfigureAwait(false);
 
         // First shot: Cloudflare default endpoint (no force) — often works when forced IPs hang.
         if (censorship.Enabled || endpoints == null || !endpoints.Any())
@@ -1487,6 +1542,10 @@ public static class WarpCli
         if (!string.IsNullOrWhiteSpace(currentEndpoint))
             WarpSuccessCache.Demote(currentEndpoint);
 
+        if (censorship.AutomaticProtocol)
+            return await TryConnectWithFallbackAsync(null, "Auto", progress, ct,
+                censorship with { DpiAssist = false, RequireLinkQuality = true }).ConfigureAwait(false);
+
         List<string> next = GetFailoverCandidates(currentEndpoint, take: Math.Max(8, censorship.MaxConnectAttempts));
         // Also try other remembered successes that weren't the failing one.
         foreach (string rem in WarpSuccessCache.GetRecentEndpoints())
@@ -1840,6 +1899,12 @@ public static class WarpCli
         if (take <= 0) return new List<string>();
 
         bool masque = protocol.Equals("MASQUE", StringComparison.OrdinalIgnoreCase);
+        if (!masque)
+        {
+            progress?.Report("WireGuard candidates are unverified until WARP completes a real handshake; no UDP latency estimate is available.");
+            return endpoints.Where(ep => TryParseHostPort(ep, out _, out _))
+                .Distinct(StringComparer.OrdinalIgnoreCase).Take(take).ToList();
+        }
         var scored = new ConcurrentBag<(string Ep, int Ms)>();
 
         await Parallel.ForEachAsync(
@@ -1850,26 +1915,11 @@ public static class WarpCli
                 if (!TryParseHostPort(ep, out string host, out int port)) return;
 
                 string reachableEndpoint = ep;
-                int ms;
-                if (masque)
+                int ms = await MeasureTcpMsAsync(host, port, timeoutMs, token).ConfigureAwait(false);
+                if (ms < 0 && port == 443)
                 {
-                    // Real TCP connect on the MASQUE port (patterniha: do not rely on ICMP).
-                    ms = await MeasureTcpMsAsync(host, port, timeoutMs, token).ConfigureAwait(false);
-                    if (ms < 0 && port == 443)
-                    {
-                        ms = await MeasureTcpMsAsync(host, 8443, timeoutMs, token).ConfigureAwait(false);
-                        if (ms >= 0) reachableEndpoint = ep[..ep.LastIndexOf(':')] + ":8443";
-                    }
-                }
-                else
-                {
-                    // WG is UDP — try cheap UDP send; also TCP/443 as CF-edge liveness.
-                    ms = await MeasureUdpMsAsync(host, port, timeoutMs, token).ConfigureAwait(false);
-                    if (ms < 0)
-                    {
-                        int tcp = await MeasureTcpMsAsync(host, 443, timeoutMs, token).ConfigureAwait(false);
-                        if (tcp >= 0) ms = tcp + 80; // deprioritize vs real UDP hits
-                    }
+                    ms = await MeasureTcpMsAsync(host, 8443, timeoutMs, token).ConfigureAwait(false);
+                    if (ms >= 0) reachableEndpoint = ep[..ep.LastIndexOf(':')] + ":8443";
                 }
 
                 if (ms >= 0)
@@ -1910,29 +1960,6 @@ public static class WarpCli
             await client.ConnectAsync(host, port, linked.Token).ConfigureAwait(false);
             sw.Stop();
             return client.Connected ? (int)sw.ElapsedMilliseconds : -1;
-        }
-        catch
-        {
-            return -1;
-        }
-    }
-
-    private static async Task<int> MeasureUdpMsAsync(string host, int port, int timeoutMs, CancellationToken ct)
-    {
-        try
-        {
-            var sw = Stopwatch.StartNew();
-            using var udp = new UdpClient();
-            udp.Client.SendTimeout = timeoutMs;
-            udp.Client.ReceiveTimeout = timeoutMs;
-            // WireGuard handshake-ish bytes — we only care that the path accepts UDP.
-            byte[] payload = new byte[] { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            linked.CancelAfter(timeoutMs);
-            await udp.SendAsync(payload, host, port, linked.Token).ConfigureAwait(false);
-            sw.Stop();
-            // No reliable reply expected; treat successful send as weak positive.
-            return (int)Math.Max(1, sw.ElapsedMilliseconds);
         }
         catch
         {

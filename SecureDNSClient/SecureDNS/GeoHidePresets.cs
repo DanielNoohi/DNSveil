@@ -43,15 +43,12 @@ public static class GeoHidePresets
     }
 
     public static string HelpSummary =>
-        "GeoHide uses Cloudflare WARP only (DNSveil 3.6).\n\n" +
-        "After Connect, game servers and websites should see a Cloudflare exit IP — not your ISP.\n\n" +
-        "• Iran / heavy DPI: enable Iran mode + DPI assist, then Connect.\n" +
-        "  – DPI assist = GoodbyeDPI fake-TTL / wrong-seq (Iran DPI reassembles fragments).\n" +
-        "  – Then Light fragment, optional Mode9 if your goodbyedpi supports -q.\n" +
-        "  – MASQUE h2-only on Cloudflare default; forced IPs skipped on warp-cli 2026.\n" +
-        "• Protocol: try WireGuard for lower latency; switch to MASQUE if UDP fails.\n" +
-        "• Health watch rotates weak endpoints automatically.\n" +
-        "• Open logs shows UserData/GeoHideLogs session files.\n\n" +
-        "Hard limit: if Cloudflare engage IPs are fully blocked, warp-cli cannot fake MASQUE SNI.\n\n" +
-        "See Assets/Presets/README_WARP.md";
+        "GeoHide uses the official Cloudflare WARP client.\n\n" +
+        "• Auto tries MASQUE first and WireGuard if needed.\n" +
+        "• WireGuard uses bounded real handshakes on distinct endpoints; UDP may still be blocked.\n" +
+        "• Test connection checks WARP, IPv4/IPv6 countries and public web responses without reconnecting.\n" +
+        "• Require exit outside Iran is strict: working Iranian exits are rejected. Leave it off for normal connectivity.\n" +
+        "• Open logs shows the connection attempts and test results.\n\n" +
+        "WARP cannot guarantee another country or acceptance by games, Spotify or ChatGPT. " +
+        "A Frankfurt data center is not proof of a German exit. This is not a kill switch.";
 }

@@ -8,7 +8,7 @@ namespace SecureDNSClient;
 
 /// <summary>
 /// GeoHide via official Cloudflare WARP (warp-cli).
-/// Iran path: fake-TTL/wrong-seq GoodbyeDPI + MASQUE h2-only (Cloudflare default).
+/// Automatic protocol recovery and read-only diagnostics; country verification is a separate strict option.
 /// </summary>
 public class FormGeoHideWarp : Form
 {
@@ -23,6 +23,7 @@ public class FormGeoHideWarp : Form
     private readonly ComboBox _cmbEndpoint = new();
     private readonly ComboBox _cmbProtocol = new();
     private readonly CustomButton _btnRefresh = new();
+    private readonly CustomButton _btnTest = new();
     private readonly CustomButton _btnConnect = new();
     private readonly CustomButton _btnDisconnect = new();
     private readonly CustomButton _btnCancel = new();
@@ -118,7 +119,7 @@ public class FormGeoHideWarp : Form
         _lblBrand.Location = new Point(14, 8);
 
         _lblTagline.AutoSize = true;
-        _lblTagline.Text = "Cloudflare exit for games & remotes · official warp-cli";
+        _lblTagline.Text = "WARP connection · country and service checks";
         _lblTagline.Location = new Point(14, 38);
 
         _lblStatus.AutoSize = false;
@@ -147,9 +148,13 @@ public class FormGeoHideWarp : Form
             catch (Exception ex) { Log("Refresh error: " + ex.Message); }
         };
 
+        StyleBtn(_btnTest, "Test connection", 126);
+        _btnTest.Location = new Point(468, 12);
+        _btnTest.Click += async (_, _) => await TestConnectionAsync();
+
         _pnlHeader.Controls.AddRange(new Control[]
         {
-            _lblBrand, _lblTagline, _lblStatus, _lblIp, _lblHealth, _btnRefresh
+            _lblBrand, _lblTagline, _lblStatus, _lblIp, _lblHealth, _btnRefresh, _btnTest
         });
         _pnlHeader.Resize += (_, _) =>
         {
@@ -158,6 +163,7 @@ public class FormGeoHideWarp : Form
             _lblIp.Width = w;
             _lblHealth.Left = _pnlHeader.ClientSize.Width - 14 - _lblHealth.Width;
             _btnRefresh.Left = _pnlHeader.ClientSize.Width - 14 - _btnRefresh.Width;
+            _btnTest.Left = _btnRefresh.Left - _btnTest.Width - 6;
         };
 
         // ---- Endpoint / protocol ----
@@ -185,7 +191,7 @@ public class FormGeoHideWarp : Form
         _cmbProtocol.Dock = DockStyle.Fill;
         _cmbProtocol.DropDownStyle = ComboBoxStyle.DropDownList;
         StyleCombo(_cmbProtocol);
-        _cmbProtocol.Items.AddRange(new object[] { "MASQUE", "WireGuard" });
+        _cmbProtocol.Items.AddRange(new object[] { "Auto", "MASQUE", "WireGuard" });
         _cmbProtocol.SelectedIndexChanged += (_, _) =>
         {
             if (_reloadingEndpoints) return;
@@ -248,7 +254,7 @@ public class FormGeoHideWarp : Form
         _chkCensorship.Text = "Iran mode";
         _chkCensorship.Checked = true;
         _chkCensorship.CheckedChanged += (_, _) => SyncOptionConflicts(fromUser: true);
-        _tips.SetToolTip(_chkCensorship, "IRCF + Cloudflare scan, MASQUE h2-only, Light DPI (proven path under Iranian DPI).");
+        _tips.SetToolTip(_chkCensorship, "Prefer MASQUE over TCP, with optional DPI assistance if its handshake fails.");
 
         _chkDpiAssist.AutoSize = true;
         _chkDpiAssist.Text = "DPI assist";
@@ -262,8 +268,8 @@ public class FormGeoHideWarp : Form
         _tips.SetToolTip(_chkLowLatency, "Stop DPI after connect; keep WARP DNS; Iran excludes off for stability.");
 
         _chkRegionalExit.AutoSize = true;
-        _chkRegionalExit.Text = "Try exit outside Iran (experimental)";
-        _tips.SetToolTip(_chkRegionalExit, "Tries both tunnel protocols for up to 2 minutes. Requires verified IPv4 and IPv6 countries outside IR. WARP may never provide one. Not a kill switch or guarantee of service access.");
+        _chkRegionalExit.Text = "Require exit outside Iran (strict; may not connect)";
+        _tips.SetToolTip(_chkRegionalExit, "Rejects working Iranian exits. Tries both tunnel protocols for up to 2 minutes. Uncheck for normal connectivity; this cannot select a country. Requires verified IPv4 and IPv6 countries outside IR. WARP may never provide one. Not a kill switch or guarantee of service access.");
         rowOpt.Controls.AddRange(new Control[] { _chkCensorship, _chkDpiAssist, _chkLowLatency, _chkRegionalExit });
 
         // ---- Log ----
@@ -373,7 +379,8 @@ public class FormGeoHideWarp : Form
         _reloadingEndpoints = true;
         try
         {
-            string protocol = _cmbProtocol.SelectedItem?.ToString() ?? "MASQUE";
+            string protocol = _cmbProtocol.SelectedItem?.ToString() ?? "Auto";
+            if (protocol == "Auto") protocol = "MASQUE";
             string keep = _cmbEndpoint.Text;
             _cmbEndpoint.BeginUpdate();
             _cmbEndpoint.Items.Clear();
@@ -457,6 +464,7 @@ public class FormGeoHideWarp : Form
         _btnConnect.Enabled = !busy;
         _btnDisconnect.Enabled = !busy;
         _btnRefresh.Enabled = !busy;
+        _btnTest.Enabled = !busy;
         _btnCancel.Enabled = busy;
         _cmbEndpoint.Enabled = !busy;
         _cmbProtocol.Enabled = !busy;
@@ -546,6 +554,41 @@ public class FormGeoHideWarp : Form
         }
     }
 
+    private async Task TestConnectionAsync()
+    {
+        if (_busy || _closing) return;
+        using var operation = BeginOperation();
+        try
+        {
+            var ct = operation.Token;
+            Log("Connection test started. Public pages only; login, playback and gameplay are not tested.");
+            var statusTask = WarpCli.RunAsync(ct, "status");
+            var exitsTask = WarpExitCheck.FetchAsync(ct);
+            var servicesTask = WarpDiagnostics.FetchAsync(ct);
+            await Task.WhenAll(statusTask, exitsTask, servicesTask).ConfigureAwait(true);
+            var reportLines = new List<string> { "DNSveil connection test — " + DateTimeOffset.Now.ToString("O"),
+                "WARP: " + WarpCli.ParseStatus(await statusTask) };
+            Log(reportLines[1]);
+            var exits = await exitsTask;
+            Log(exits.Summary);
+            reportLines.Add(exits.Summary);
+            foreach (var line in await servicesTask) { Log(line); reportLines.Add(line); }
+            Log(exits.IsOutside("IR")
+                ? "Both tested IP families report outside Iran. Service-specific restrictions remain unverified."
+                : "Outside-Iran requirement not verified. A connected tunnel and a changed country are separate results.");
+            reportLines.Add("No game, login or playback test was performed. Country observations are not proof of service access.");
+            Log("Where Winds Meet: game connection not tested; a website response cannot verify gameplay.");
+            string directory = Path.Combine(SecureDNS.UserDataDirPath, "GeoHideLogs");
+            Directory.CreateDirectory(directory);
+            string path = Path.Combine(directory, "connection-test-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..8] + ".txt");
+            await File.WriteAllLinesAsync(path, reportLines, ct).ConfigureAwait(true);
+            Log("Saved connection report: " + path);
+        }
+        catch (OperationCanceledException) { Log("Connection test cancelled."); }
+        catch (Exception ex) { Log("Connection test failed: " + ex.Message); }
+        finally { EndOperation(operation); }
+    }
+
     private async Task DisconnectAsync()
     {
         if (_busy || _closing) return;
@@ -606,12 +649,14 @@ public class FormGeoHideWarp : Form
 
         while (!ct.IsCancellationRequested)
         {
+            if (_busy) { await Task.Delay(1000, ct).ConfigureAwait(false); continue; }
             if (_lastOpt?.TryExitOutsideIran == true)
             {
                 var exit = await WarpExitCheck.FetchAsync(ct).ConfigureAwait(false);
                 UiLog("Exit recheck: " + exit.Summary);
                 if (!exit.IsOutside("IR"))
                 {
+                    if (_busy) continue;
                     ct.ThrowIfCancellationRequested();
                     await WarpCli.RunAsync(ct, "disconnect").ConfigureAwait(false);
                     SetHealthUi("Exit country changed or unverified — reconnect manually", false);
@@ -845,7 +890,9 @@ public class FormGeoHideWarp : Form
 
             SyncOptionConflicts(fromUser: false);
             string protocol = _cmbProtocol.SelectedItem?.ToString() ?? "MASQUE";
-            if (censorship && protocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase))
+            if (protocol == "Auto")
+                Log("Auto: tries MASQUE first, then bounded WireGuard recovery if needed.");
+            else if (censorship && protocol.Equals("WireGuard", StringComparison.OrdinalIgnoreCase))
                 Log("Protocol: WireGuard (UDP). If connect fails under DPI, switch to MASQUE.");
             else if (censorship)
                 Log("Protocol: MASQUE (TCP/H2 — usually best under Iranian DPI).");
@@ -876,6 +923,7 @@ public class FormGeoHideWarp : Form
                 TryWireGuardUpgrade = false,
                 ApplyIranExcludes = false,
                 TryExitOutsideIran = _chkRegionalExit.Checked,
+                AutomaticProtocol = protocol == "Auto",
                 RequireLinkQuality = !censorship,
                 MaxCandidates = censorship ? 48 : 24,
                 MaxConnectAttempts = censorship ? 14 : 8,
@@ -891,7 +939,7 @@ public class FormGeoHideWarp : Form
             {
                 endpointList = null;
                 Log(censorship
-                    ? "Connect: Cloudflare default (MASQUE/WG). Forced IPs skipped — they break warp-cli 2026."
+                    ? "Connect: automatic endpoint selection with bounded handshake attempts."
                     : "Connecting with Cloudflare default…");
             }
             else
@@ -914,7 +962,7 @@ public class FormGeoHideWarp : Form
             sessionEnded = true;
             if (!string.IsNullOrEmpty(WarpSessionLog.CurrentLogPath))
                 Log("Full diagnostics: " + WarpSessionLog.CurrentLogPath);
-            if (!string.IsNullOrEmpty(usedProtocol) &&
+            if (protocol != "Auto" && !string.IsNullOrEmpty(usedProtocol) &&
                 !string.Equals(usedProtocol, _cmbProtocol.SelectedItem?.ToString(), StringComparison.OrdinalIgnoreCase))
             {
                 int idx = _cmbProtocol.Items.IndexOf(usedProtocol);
@@ -937,7 +985,9 @@ public class FormGeoHideWarp : Form
             }
             else
             {
-                SetHealthUi("Health: idle", true);
+                SetHealthUi("Connection not established", false);
+                if (opt.TryExitOutsideIran)
+                    Log("Strict country requirement was not met. To allow a normal WARP connection, uncheck Require exit outside Iran and choose Auto. Your exit may remain Iranian.");
                 Log("Connect failed — see log above, or Open logs for the session file.");
             }
         }
