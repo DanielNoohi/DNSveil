@@ -1,3 +1,12 @@
+# v4.1.0
+
+- Advanced WARP scans 1–4 endpoints concurrently (default 2), with results as they complete and a progress indicator.
+- Each worker uses its own encrypted, reusable profile pair. Profile creation requires the terms checkbox; choose one worker to keep using the existing pair. Selected results reconnect with the profiles used during scanning.
+- Cancellation and unexpected failures wait for all active workers to clean up before another operation can start.
+- Official WARP has a dedicated status panel, prominent connection controls, settings explanations and a separate activity log. Both modes remain inside the main DNSveil window.
+- Validation: 76 regression checks passed, including bounded concurrency, cancellation, worker-failure cleanup, embedded UI rendering and real local TCP/UDP forwarding. Live parallel WARP performance on the affected ISP has not been measured.
+- Country verification remains unchanged; this update does not guarantee an exit outside Iran.
+
 # v4.0.1
 
 - GeoHide is embedded in the main DNSveil window, with Official and Advanced WARP tabs. Reopening it selects the existing page.

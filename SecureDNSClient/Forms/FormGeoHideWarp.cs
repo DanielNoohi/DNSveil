@@ -130,26 +130,27 @@ public class FormGeoHideWarp : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 5,
+            RowCount = 6,
             Padding = new Padding(12),
         };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 108)); // header
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));  // endpoint row
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));  // actions
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 142));  // options
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // log
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 164));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 166));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         // ---- Header status strip ----
         _pnlHeader.Dock = DockStyle.Fill;
         _pnlHeader.Padding = new Padding(14, 10, 14, 10);
 
         _lblBrand.AutoSize = true;
-        _lblBrand.Text = "GeoHide";
+        _lblBrand.Text = "Official WARP";
         _lblBrand.Font = new Font("Segoe UI Semibold", 16F, FontStyle.Bold);
         _lblBrand.Location = new Point(14, 8);
 
         _lblTagline.AutoSize = true;
-        _lblTagline.Text = "WARP connection · country and service checks";
+        _lblTagline.Text = "Connect with the installed Cloudflare client. Auto chooses a working protocol.";
         _lblTagline.Location = new Point(14, 38);
 
         _lblStatus.AutoSize = false;
@@ -182,19 +183,17 @@ public class FormGeoHideWarp : Form
         _btnTest.Location = new Point(468, 12);
         _btnTest.Click += async (_, _) => await TestConnectionAsync();
 
-        _pnlHeader.Controls.AddRange(new Control[]
-        {
-            _lblBrand, _lblTagline, _lblStatus, _lblIp, _lblHealth, _btnRefresh, _btnTest
-        });
-        _pnlHeader.Resize += (_, _) =>
-        {
-            int w = Math.Max(200, _pnlHeader.ClientSize.Width - 28 - 160);
-            _lblStatus.Width = w;
-            _lblIp.Width = w;
-            _lblHealth.Left = _pnlHeader.ClientSize.Width - 14 - _lblHealth.Width;
-            _btnRefresh.Left = _pnlHeader.ClientSize.Width - 14 - _btnRefresh.Width;
-            _btnTest.Left = _btnRefresh.Left - _btnTest.Width - 6;
-        };
+        var summary = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5 };
+        foreach (int height in new[] { 34, 26, 26, 26, 26 }) summary.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
+        int summaryRow = 0;
+        foreach (var label in new[] { _lblBrand, _lblTagline, _lblStatus, _lblIp, _lblHealth }) {
+            label.Dock = DockStyle.Fill;
+            label.AutoSize = false;
+            label.TextAlign = ContentAlignment.MiddleLeft;
+            label.Margin = Padding.Empty;
+            summary.Controls.Add(label, 0, summaryRow++);
+        }
+        _pnlHeader.Controls.Add(summary);
 
         // ---- Endpoint / protocol ----
         var rowEp = new TableLayoutPanel
@@ -206,7 +205,8 @@ public class FormGeoHideWarp : Form
         rowEp.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 72));
         rowEp.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         rowEp.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 64));
-        rowEp.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
+        rowEp.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170));
+        rowEp.Padding = new Padding(8, 12, 8, 10);
 
         _lblEp.Text = "Endpoint";
         _lblEp.Dock = DockStyle.Fill;
@@ -242,7 +242,8 @@ public class FormGeoHideWarp : Form
             WrapContents = false,
             Padding = new Padding(0, 4, 0, 0),
         };
-        StyleBtn(_btnConnect, "Connect", 100);
+        StyleBtn(_btnConnect, "Connect WARP", 150);
+        _btnConnect.Font = new Font(Font, FontStyle.Bold);
         StyleBtn(_btnDisconnect, "Disconnect", 96);
         StyleBtn(_btnCancel, "Cancel", 72);
         StyleBtn(_btnMinimize, "Minimize", 84);
@@ -268,39 +269,50 @@ public class FormGeoHideWarp : Form
 
         rowAct.Controls.AddRange(new Control[]
         {
-            _btnConnect, _btnDisconnect, _btnCancel, _btnMinimize, _btnInstall, _btnLogs, _btnHelp
+            _btnConnect, _btnDisconnect, _btnCancel, _btnTest, _btnRefresh
         });
 
         // ---- Options ----
-        var rowOpt = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.TopDown,
-            WrapContents = false,
-            Padding = new Padding(0, 2, 0, 0),
+        var rowOpt = new TableLayoutPanel {
+            Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, Padding = new Padding(0, 4, 0, 4)
         };
+        rowOpt.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        rowOpt.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        rowOpt.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
+        rowOpt.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
 
         _chkCensorship.AutoSize = true;
-        _chkCensorship.Text = "Iran mode";
+        _chkCensorship.Text = "Improve connectivity in Iran";
         _chkCensorship.Checked = true;
         _chkCensorship.CheckedChanged += (_, _) => SyncOptionConflicts(fromUser: true);
         _tips.SetToolTip(_chkCensorship, "Prefer MASQUE over TCP, with optional DPI assistance if its handshake fails.");
 
         _chkDpiAssist.AutoSize = true;
-        _chkDpiAssist.Text = "DPI assist";
+        _chkDpiAssist.Text = "Assist blocked handshakes";
         _chkDpiAssist.Checked = true;
         _tips.SetToolTip(_chkDpiAssist, "GoodbyeDPI during connect: fake TTL / wrong-seq packets (survives TCP reassembly) then Light fragment. Auto-stopped after connect.");
 
         _chkLowLatency.AutoSize = true;
-        _chkLowLatency.Text = "Low latency";
+        _chkLowLatency.Text = "Prefer low latency";
         _chkLowLatency.Checked = true;
         _chkLowLatency.CheckedChanged += (_, _) => SyncOptionConflicts(fromUser: true);
         _tips.SetToolTip(_chkLowLatency, "Stop DPI after connect; keep WARP DNS; Iran excludes off for stability.");
 
         _chkRegionalExit.AutoSize = true;
-        _chkRegionalExit.Text = "Require exit outside Iran (strict; may not connect)";
+        _chkRegionalExit.Text = "Require an exit outside Iran";
         _tips.SetToolTip(_chkRegionalExit, "Rejects working Iranian exits. Tries both tunnel protocols for up to 2 minutes. Uncheck for normal connectivity; this cannot select a country. Requires verified IPv4 and IPv6 countries outside IR. WARP may never provide one. Not a kill switch or guarantee of service access.");
-        rowOpt.Controls.AddRange(new Control[] { _chkCensorship, _chkDpiAssist, _chkLowLatency, _chkRegionalExit });
+        Control Setting(CheckBox toggle, string description) {
+            var card = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, Padding = new Padding(10, 6, 10, 4) };
+            card.RowStyles.Add(new RowStyle(SizeType.Absolute, 25));
+            card.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            card.Controls.Add(toggle, 0, 0);
+            card.Controls.Add(new Label { Text = description, Dock = DockStyle.Fill, AutoEllipsis = true }, 0, 1);
+            return card;
+        }
+        rowOpt.Controls.Add(Setting(_chkCensorship, "Uses connection recovery suited to restricted networks."), 0, 0);
+        rowOpt.Controls.Add(Setting(_chkDpiAssist, "Helps the initial connection get through network filtering."), 1, 0);
+        rowOpt.Controls.Add(Setting(_chkLowLatency, "Stops connection assistance after WARP is ready."), 0, 1);
+        rowOpt.Controls.Add(Setting(_chkRegionalExit, "Rejects IR or unknown countries; may prevent connection."), 1, 1);
 
 
 
@@ -316,7 +328,11 @@ public class FormGeoHideWarp : Form
         root.Controls.Add(rowEp, 0, 1);
         root.Controls.Add(rowAct, 0, 2);
         root.Controls.Add(rowOpt, 0, 3);
-        root.Controls.Add(_log, 0, 4);
+        var logBar = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
+        logBar.Controls.Add(new Label { Text = "Connection activity", AutoSize = true, Margin = new Padding(8, 10, 18, 0) });
+        logBar.Controls.AddRange(new Control[] { _btnLogs, _btnHelp, _btnInstall });
+        root.Controls.Add(logBar, 0, 4);
+        root.Controls.Add(_log, 0, 5);
 
         var tabs = new TabControl { Dock = DockStyle.Fill, Name = "GeoHideConnectionTabs" };
         var official = new TabPage("Official WARP");
@@ -364,6 +380,11 @@ public class FormGeoHideWarp : Form
         _lblHealth.ForeColor = Color.FromArgb(120, 200, 160);
         _lblHealth.BackColor = Color.Transparent;
         _btnRefresh.BorderColor = Color.DodgerBlue;
+        _btnConnect.BackColor = Color.FromArgb(32, 93, 170);
+        _btnConnect.ForeColor = Color.White;
+        _btnConnect.BorderColor = Color.FromArgb(88, 166, 255);
+        _log.BackColor = Color.FromArgb(16, 22, 30);
+        _log.ForeColor = Color.Gainsboro;
     }
 
     private void OpenLogsFolder()

@@ -6,9 +6,9 @@ This optional backend uses Xray for WARP / WARP-on-WARP and sing-box for this PC
 
 1. Extract the complete portable x64 release and run SecureDNSClientPortable.exe as Administrator.
 2. Disconnect the official WARP tunnel and other VPNs. Open Tools → GeoHide WARP and select Advanced WARP inside the main DNSveil window.
-3. Read Cloudflare's terms using the link. If you accept, tick the checkbox to allow creation of two WARP profiles. Existing profiles are reused.
+3. Read Cloudflare's terms using the link. If you accept, tick the checkbox to allow creation of reusable WARP profiles: two per scan worker (four with the default two workers). Existing profiles are reused.
 4. Start with WARP-on-WARP and Warp Pro noise enabled. The default endpoint list and noise values are starting points, not known-working settings for your ISP.
-5. Click Scan endpoints. It tests actual HTTPS traffic and a UDP DNS response through each candidate. Scanning does not install PC routes. Up to 16 custom IP:port endpoints are accepted; bracket IPv6 addresses.
+5. Choose Parallel scans (1–4; default 2), then click Scan endpoints. It tests actual HTTPS traffic and a UDP DNS response through each candidate. Scanning does not install PC routes. Up to 16 custom IP:port endpoints are accepted; bracket IPv6 addresses. Results appear as workers finish, with a completion counter and progress bar. Cancel waits for active tunnels to stop; queued endpoints are not started. Each worker has separate encrypted profiles to prevent simultaneous tunnels from sharing an identity. Initial profile creation is sequential and may take time; later scans reuse those profiles. Choose 1 if you prefer not to create additional profiles. A selected result is rechecked using its scanned profiles when connecting. Latencies measured concurrently may be affected by shared network bandwidth.
 6. Inspect the HTTPS, UDP and country columns. Verified outside-Iran candidates are preferred, then ranked by latency. Click Connect this PC to verify it again and then activate the adapter.
 7. Test the game or service. Changing main-app pages or minimizing DNSveil keeps the tunnel running. Disconnect in Advanced WARP or use tray → Exit to stop it. Switching to Official WARP is disabled while Advanced WARP is busy or connected.
 

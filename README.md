@@ -9,7 +9,7 @@
 
 A hardened fork of [msasanmh/DNSveil](https://github.com/msasanmh/DNSveil) (Secure DNS Client) with **GeoHide WARP**, Iran-aware connect paths, and production-minded reliability work.
 
-**Latest:** [v4.0.1](https://github.com/DanielNoohi/DNSveil/releases/latest) · [Download portable x64](https://github.com/DanielNoohi/DNSveil/releases/latest)
+**Latest:** [v4.1.0](https://github.com/DanielNoohi/DNSveil/releases/latest) · [Download portable x64](https://github.com/DanielNoohi/DNSveil/releases/latest)
 
 ---
 
@@ -146,7 +146,9 @@ GeoHide does **not** ship Shecan / gaming Smart DNS / upstream-proxy presets any
 
 ---
 
-## What's new in v4.0.1
+## What's new in v4.1.0
+
+**Advanced WARP scans endpoints in parallel** with 1–4 isolated workers (default 2), live progress and coordinated cancellation. Official WARP has a clearer status panel, primary connection controls and settings explanations.
 
 **GeoHide stays inside the main app**, with Official and Advanced WARP tabs. Iranian exits are clearly labeled and verified non-IR candidates are preferred.
 
@@ -166,6 +168,7 @@ Recent work focuses on GeoHide reliability under censorship:
 
 | Version | Focus |
 |---------|--------|
+| **4.1.0** | Parallel endpoint scanning with isolated profiles, live progress and refreshed Official WARP UI |
 | **4.0.1** | Embedded GeoHide, shared connection tabs, explicit IR results and strict regional default |
 | **4.0.0** | Optional Xray/WARP-on-WARP backend, configurable noise, real HTTPS/UDP scanning, PC routing, protected profiles and 69 checks |
 | **3.9.0** | Auto protocol recovery, bounded real WireGuard handshakes, read-only connection reports, clearer strict country option and 44 checks |

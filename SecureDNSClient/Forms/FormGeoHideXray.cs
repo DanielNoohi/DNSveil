@@ -13,6 +13,8 @@ internal sealed class FormGeoHideXray : Form
     private readonly CheckBox noise = new() { Text = "Warp Pro noise", Checked = true, AutoSize = true };
     private readonly NumericUpDown count = Number(1, 10, 5), sizeMin = Number(1, 1280, 50), sizeMax = Number(1, 1280, 100),
         delayMin = Number(0, 100, 1), delayMax = Number(0, 100, 5);
+    private readonly NumericUpDown parallel = Number(1, 4, 2);
+    private readonly ProgressBar scanProgress = new() { Dock = DockStyle.Fill, Height = 8 };
     private readonly CheckBox strict = new() { Text = "Require both exit countries outside Iran (may not connect)", Checked = true, AutoSize = true };
     private readonly CheckBox terms = new() { Text = "I accept Cloudflare's terms for creating WARP profiles", AutoSize = true };
     private readonly TextBox endpoints = new() { Multiline = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill };
@@ -43,14 +45,17 @@ internal sealed class FormGeoHideXray : Form
         Font = new Font("Segoe UI", 9);
         mode.Items.AddRange(new object[] { "WARP-on-WARP (two tunnels)", "WARP (one tunnel)" }); mode.SelectedIndex = 0;
         endpoints.Text = string.Join(Environment.NewLine, XrayWarpConfig.DefaultEndpoints);
-        foreach (string column in new[] { "Endpoint", "HTTPS ms", "UDP", "IPv4 country", "IPv6 country", "Result" }) results.Columns.Add(column, column);
+        foreach (string column in new[] { "Endpoint", "HTTPS ms", "UDP", "IPv4 country", "IPv6 country", "Result" }) {
+            int index = results.Columns.Add(column, column);
+            results.Columns[index].SortMode = DataGridViewColumnSortMode.NotSortable;
+        }
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 9, Padding = new Padding(12) };
         foreach (int height in new[] { 40, 38, 34, 30, 90, 40, 170, 36 }) layout.RowStyles.Add(new RowStyle(SizeType.Absolute, height));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.Controls.Add(new Label { Text = "Real tunnel scanning • TCP + UDP for this PC • Experimental country change", AutoSize = true }, 0, 0);
         layout.Controls.Add(Row(mode, noise, new Label { Text = "Packets", AutoSize = true }, count), 0, 1);
         layout.Controls.Add(Row(new Label { Text = "Noise bytes", AutoSize = true }, sizeMin, sizeMax,
-            new Label { Text = "Delay ms", AutoSize = true }, delayMin, delayMax), 0, 2);
+            new Label { Text = "Delay ms", AutoSize = true }, delayMin, delayMax, new Label { Text = "Parallel scans", AutoSize = true }, parallel), 0, 2);
         layout.Controls.Add(strict, 0, 3);
         layout.Controls.Add(endpoints, 0, 4);
         layout.Controls.Add(Row(scan, connect, stop, cancel, test, logs), 0, 5);
@@ -58,9 +63,9 @@ internal sealed class FormGeoHideXray : Form
         var termsLink = new LinkLabel { Text = "Cloudflare terms", AutoSize = true };
         termsLink.LinkClicked += (_, _) => Process.Start(new ProcessStartInfo("https://www.cloudflare.com/application/terms/") { UseShellExecute = true });
         layout.Controls.Add(Row(terms, termsLink), 0, 7);
-        var bottom = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2 };
-        bottom.RowStyles.Add(new RowStyle(SizeType.Absolute, 34)); bottom.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        bottom.Controls.Add(status, 0, 0); bottom.Controls.Add(log, 0, 1); layout.Controls.Add(bottom, 0, 8);
+        var bottom = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3 };
+        bottom.RowStyles.Add(new RowStyle(SizeType.Absolute, 34)); bottom.RowStyles.Add(new RowStyle(SizeType.Absolute, 10)); bottom.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        bottom.Controls.Add(status, 0, 0); bottom.Controls.Add(scanProgress, 0, 1); bottom.Controls.Add(log, 0, 2); layout.Controls.Add(bottom, 0, 8);
         Controls.Add(layout); Theme.LoadTheme(this, Theme.Themes.Dark);
         results.BackgroundColor = Color.FromArgb(22, 27, 34);
         results.DefaultCellStyle.BackColor = Color.FromArgb(28, 36, 48);
@@ -103,7 +108,7 @@ internal sealed class FormGeoHideXray : Form
         bool idle = operation == null, connected = session != null;
         scan.Enabled = connect.Enabled = idle && !connected; stop.Enabled = test.Enabled = idle && connected;
         cancel.Enabled = !idle; endpoints.Enabled = mode.Enabled = noise.Enabled = strict.Enabled = terms.Enabled = idle && !connected;
-        foreach (var item in new[] { count, sizeMin, sizeMax, delayMin, delayMax }) item.Enabled = idle && !connected;
+        foreach (var item in new[] { count, sizeMin, sizeMax, delayMin, delayMax, parallel }) item.Enabled = idle && !connected;
     }
     private void Log(string message) {
         if (IsDisposed) return;
@@ -119,7 +124,7 @@ internal sealed class FormGeoHideXray : Form
             reportPath ??= Path.Combine(root, "session-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..8] + ".log");
             await action(cts.Token);
         }
-        catch (OperationCanceledException) { Log("Cancelled or operation deadline reached."); await StopAsync(); }
+        catch (OperationCanceledException) { Log("Cancelled or operation deadline reached; scan tunnels stopped."); await StopAsync(); status.Text = "Cancelled; tunnel cleanup finished. Completed scan results kept."; }
         catch (Exception ex) { Log("Operation stopped: " + ex.Message); await StopAsync(); status.Text = ex.Message; }
         finally {
             operation = null; SetControls();
@@ -134,27 +139,50 @@ internal sealed class FormGeoHideXray : Form
         return await XrayWarpProfiles.LoadOrCreateAsync(root, Path.Combine(tools, "xray.exe"), terms.Checked, new Progress<string>(Log), ct);
     }
     private async Task ScanAsync(CancellationToken ct) {
-        string[] candidates = Endpoints(); var options = Options(); var accounts = await PrepareAsync(ct);
+        string[] candidates = Endpoints(); var options = Options();
+        int workers = Math.Min((int)parallel.Value, candidates.Length);
+        bool requireOutside = strict.Checked;
+        results.Rows.Clear(); scanProgress.Value = 0; scanProgress.Maximum = candidates.Length;
+        status.Text = "Preparing reusable profiles for parallel scanning…";
+        if (!terms.Checked && Enumerable.Range(1, workers - 1).Any(worker =>
+            !File.Exists(Path.Combine(root, "scan-workers", "worker-" + (worker + 1), "profiles.dpapi"))))
+            throw new InvalidOperationException("Parallel scanning needs extra reusable WARP profiles. Accept Cloudflare's terms below or set Parallel scans to 1.");
+        var pool = new List<XrayWarpAccount[]> { await PrepareAsync(ct) };
+        for (int worker = 1; worker < workers; worker++) {
+            Log($"Preparing scan worker {worker + 1}/{workers}. Extra profiles are created only once and reused.");
+            pool.Add(await XrayWarpProfiles.LoadOrCreateAsync(
+                Path.Combine(root, "scan-workers", "worker-" + (worker + 1)), Path.Combine(tools, "xray.exe"),
+                terms.Checked, new Progress<string>(Log), ct));
+        }
+        if (pool.SelectMany(pair => pair).Select(account => account.PrivateKey).Distinct().Count() != workers * 2)
+            throw new InvalidOperationException("Parallel workers must have separate WARP profiles.");
         results.Rows.Clear(); status.Text = "Scanning real tunnels; system routes are unchanged.";
-        Log($"Scan: {(options.DoubleTunnel ? "two" : "one")} tunnel(s), noise={options.Noise}, {candidates.Length} endpoints.");
+        Log($"Scan: {(options.DoubleTunnel ? "two" : "one")} tunnel(s), noise={options.Noise}, {candidates.Length} endpoints, {workers} parallel workers.");
         int? bestRow = null; XrayWarpProbeResult? bestProbe = null;
         int iranExits = 0;
-        foreach (string endpoint in candidates) {
-            ct.ThrowIfCancellationRequested();
-            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct); deadline.CancelAfter(TimeSpan.FromSeconds(22));
+        int completed = 0;
+        await WarpParallelScan.RunAsync(candidates, workers, async (worker, endpoint, token) => {
+            token.ThrowIfCancellationRequested();
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token); deadline.CancelAfter(TimeSpan.FromSeconds(22));
             try {
-                await using var candidate = await XrayWarpSession.StartAsync(root, tools, accounts, endpoint, options, deadline.Token);
+                await using var candidate = await XrayWarpSession.StartAsync(root, tools, pool[worker], endpoint, options, deadline.Token);
                 var probe = await candidate.ProbeAsync(deadline.Token);
-                bool eligible = probe.IsEligible(strict.Checked);
+                bool eligible = probe.IsEligible(requireOutside);
                 if (probe.HasIranExit) iranExits++;
                 int row = results.Rows.Add(endpoint, probe.LatencyMs, probe.UdpOk ? "Pass" : "Unverified",
-                    probe.Exit.IPv4.Country ?? "?", probe.Exit.IPv6.Country ?? "?", probe.SelectionStatus(strict.Checked));
+                    probe.Exit.IPv4.Country ?? "?", probe.Exit.IPv6.Country ?? "?", probe.SelectionStatus(requireOutside));
+                results.Rows[row].Tag = pool[worker];
                 if (eligible && probe.IsPreferredTo(bestProbe)) { bestRow = row; bestProbe = probe; }
                 Log(endpoint + " — " + probe.Summary);
             }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested) { results.Rows.Add(endpoint, "—", "?", "?", "?", "Timeout"); Log(endpoint + " — timed out."); }
-            catch (Exception ex) when (ex is IOException or SocketException or InvalidOperationException) { results.Rows.Add(endpoint, "—", "?", "?", "?", "Failed"); Log(endpoint + " — " + ex.Message); }
-        }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested) { results.Rows.Add(endpoint, "—", "?", "?", "?", "Timeout"); Log(endpoint + " — timed out."); }
+            catch (Exception ex) when (ex is IOException or SocketException or InvalidOperationException or TimeoutException) { results.Rows.Add(endpoint, "—", "?", "?", "?", "Failed"); Log(endpoint + " — " + ex.Message); }
+            finally {
+                completed++;
+                scanProgress.Value = completed;
+                status.Text = $"Scanning: {completed}/{candidates.Length} completed · up to {workers} at once";
+            }
+        }, ct);
         results.ClearSelection();
         if (bestRow.HasValue) { results.Rows[bestRow.Value].Selected = true; results.CurrentCell = results.Rows[bestRow.Value].Cells[0]; }
         status.Text = bestProbe != null
@@ -170,6 +198,8 @@ internal sealed class FormGeoHideXray : Form
         string endpoint = results.SelectedRows.Count > 0 ? results.SelectedRows[0].Cells[0].Value?.ToString() ?? "" : Endpoints()[0];
         XrayWarpConfig.ParseEndpoint(endpoint);
         var options = Options(); var accounts = await PrepareAsync(ct);
+        if (results.SelectedRows.Count > 0 && results.SelectedRows[0].Tag is XrayWarpAccount[] scannedAccounts)
+            accounts = scannedAccounts;
         status.Text = "Verifying selected tunnel before enabling PC routing…";
         session = await XrayWarpSession.StartAsync(root, tools, accounts, endpoint, options, ct);
         var probe = await session.ProbeAsync(ct); Log(probe.Summary);

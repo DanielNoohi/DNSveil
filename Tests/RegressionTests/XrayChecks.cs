@@ -9,6 +9,7 @@ internal static class XrayChecks
 {
     internal static async Task RunAsync(Action<bool, string> check)
     {
+        await ParallelChecksAsync(check);
         Exception? uiError = null;
         var uiThread = new Thread(() => {
             try {
@@ -32,6 +33,10 @@ internal static class XrayChecks
                 host.Controls.Add(geo);
                 host.Show(); geo.Show();
                 var tabs = geo.Controls.OfType<System.Windows.Forms.TabControl>().Single();
+                using (var official = new System.Drawing.Bitmap(host.Width, host.Height)) {
+                    host.DrawToBitmap(official, new System.Drawing.Rectangle(0, 0, host.Width, host.Height));
+                    official.Save(Path.Combine(AppContext.BaseDirectory, "official-warp-ui.png"));
+                }
                 tabs.SelectedIndex = 1;
                 System.Windows.Forms.Application.DoEvents();
                 var advanced = tabs.TabPages[1].Controls.OfType<SecureDNSClient.FormGeoHideXray>().Single();
@@ -166,4 +171,63 @@ internal static class XrayChecks
         try { await closed.ConnectAsync(IPAddress.Loopback, port, ct); } catch (SocketException) { stopped = true; }
         check(stopped, "Disposing an owned backend closes its listener and process");
     }
+    private static async Task ParallelChecksAsync(Action<bool, string> check)
+    {
+        var ready = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        int active = 0, peak = 0, completed = 0;
+        var seen = new System.Collections.Concurrent.ConcurrentDictionary<string, int>();
+        var workerBusy = new int[3];
+        var endpoints = Enumerable.Range(0, 9).Select(i => i.ToString()).ToArray();
+        var scan = WarpParallelScan.RunAsync(endpoints, 3, async (worker, endpoint, ct) => {
+            if (Interlocked.Increment(ref workerBusy[worker]) != 1) throw new Exception("Profile reused concurrently");
+            int running = Interlocked.Increment(ref active);
+            int previous;
+            do { previous = Volatile.Read(ref peak); if (previous >= running) break; }
+            while (Interlocked.CompareExchange(ref peak, running, previous) != previous);
+            if (running == 3) ready.TrySetResult(true);
+            try {
+                await release.Task.WaitAsync(ct);
+                seen.AddOrUpdate(endpoint, 1, (_, n) => n + 1);
+                Interlocked.Increment(ref completed);
+            }
+            finally { Interlocked.Decrement(ref active); Interlocked.Decrement(ref workerBusy[worker]); }
+        }, default);
+        try { await ready.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
+        finally { release.TrySetResult(true); }
+        await scan;
+        check(peak == 3 && active == 0 && completed == 9 && seen.Values.All(n => n == 1),
+            "Parallel scan overlaps three workers, respects the limit and tests every endpoint exactly once");
+
+        using var cancel = new CancellationTokenSource();
+        var started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        int entered = 0, cleaned = 0;
+        var cancelled = WarpParallelScan.RunAsync(endpoints, 2, async (_, _, ct) => {
+            if (Interlocked.Increment(ref entered) == 2) started.TrySetResult(true);
+            try { await Task.Delay(Timeout.Infinite, ct); }
+            finally { Interlocked.Increment(ref cleaned); }
+        }, cancel.Token);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancel.Cancel();
+        bool observed = false;
+        try { await cancelled; } catch (OperationCanceledException) { observed = true; }
+        check(observed && entered == 2 && cleaned == 2, "Cancel drains every active scan worker and leaves queued endpoints unstarted");
+
+        var both = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        entered = cleaned = 0;
+        bool failed = false;
+        try {
+            await WarpParallelScan.RunAsync(endpoints, 2, async (worker, _, ct) => {
+                if (Interlocked.Increment(ref entered) == 2) both.TrySetResult(true);
+                try {
+                    await both.Task.WaitAsync(TimeSpan.FromSeconds(5), ct);
+                    if (worker == 0) throw new InvalidOperationException("fixture failure");
+                    await Task.Delay(Timeout.Infinite, ct);
+                }
+                finally { Interlocked.Increment(ref cleaned); }
+            }, default);
+        } catch (InvalidOperationException) { failed = true; }
+        check(failed && entered == 2 && cleaned == 2, "Unexpected worker failure cancels and drains sibling workers before returning");
+    }
+
 }
